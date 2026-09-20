@@ -1,0 +1,19 @@
+# Dependencias
+node_modules/
+
+# Builds de electron-builder
+dist/
+out/
+
+# Datos locales de la app (no deben ir al repo: contienen rutas absolutas de tu PC)
+servers.json
+*.log
+
+# Sistema operativo / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Variables de entorno si algún día se añaden
+.env

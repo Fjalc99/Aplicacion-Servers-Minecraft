@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self';" />
+  <title>Minecraft Server Manager</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand">
+        <svg class="brand-mark" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M12 2L21 7V17L12 22L3 17V7L12 2Z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
+          <path d="M12 2V12M12 12L21 7M12 12L3 7M12 12V22" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
+        </svg>
+        <span class="brand-name">Server Manager</span>
+      </div>
+      <button id="newServerBtn" type="button" class="btn btn-accent btn-block">
+        <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M12 5V19M5 12H19" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+        Nuevo servidor
+      </button>
+      <div class="server-list" id="serverList"></div>
+      <div class="java-status" id="javaStatus"><span class="dot"></span><span id="javaStatusText">Comprobando Java…</span></div>
+    </aside>
+
+    <main class="main">
+      <div id="appNotice" class="app-notice" role="alert" hidden></div>
+      <div id="emptyState" class="empty-state">
+        <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M12 2L21 7V17L12 22L3 17V7L12 2Z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/>
+          <path d="M12 12V22M12 12L3 7M12 12L21 7" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/>
+        </svg>
+        <p class="empty-title">Ningún servidor seleccionado</p>
+        <p class="empty-sub">Crea un servidor nuevo o elige uno de la lista de la izquierda.</p>
+      </div>
+
+      <div id="serverView" class="server-view" hidden>
+        <header class="server-header">
+          <div>
+            <h1 id="svName">—</h1>
+            <div class="server-meta" id="svMeta"></div>
+          </div>
+          <div class="server-actions">
+            <span class="status-pill">
+              <span class="status-dot" id="statusDot"></span>
+              <span id="statusLabel" class="status-label">Detenido</span>
+            </span>
+            <button id="btnStart" type="button" class="btn btn-accent">
+              <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M6 4L20 12L6 20V4Z" fill="currentColor"/></svg>
+              Iniciar
+            </button>
+            <button id="btnStop" type="button" class="btn btn-danger">
+              <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="6" y="6" width="12" height="12" rx="1.5" fill="currentColor"/></svg>
+              Detener
+            </button>
+            <button id="btnOpenFolder" type="button" class="btn btn-ghost">
+              <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M3 7a1 1 0 0 1 1-1h4l2 2h10a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V7Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>
+              Abrir carpeta
+            </button>
+            <button id="btnDelete" type="button" class="btn btn-ghost">
+              <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M4 6h16M9 6V4h6v2m-8 0 1 14h8l1-14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              Eliminar
+            </button>
+          </div>
+        </header>
+
+        <nav class="tabs">
+          <button type="button" class="tab" data-tab="overview">Resumen</button>
+          <button type="button" class="tab" data-tab="config">Configuración</button>
+          <button type="button" class="tab" data-tab="mods">Mods</button>
+          <button type="button" class="tab active" data-tab="console">Consola</button>
+        </nav>
+
+        <section id="tab-overview" class="tab-panel" hidden></section>
+        <section id="tab-config" class="tab-panel" hidden></section>
+        <section id="tab-mods" class="tab-panel" hidden></section>
+        <section id="tab-console" class="tab-panel">
+          <div class="console-log" id="consoleLog"></div>
+          <div class="console-input-row">
+            <input id="consoleInput" type="text" placeholder="Escribe un comando y pulsa Enter…" disabled />
+            <button id="consoleSend" type="button" class="btn btn-accent" disabled>
+              <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M4 20L20 12L4 4L4 10L14 12L4 14L4 20Z" fill="currentColor"/></svg>
+              Enviar
+            </button>
+          </div>
+        </section>
+      </div>
+
+      <section id="wizardOverlay" class="wizard-screen" hidden aria-label="Crear o importar servidor">
+        <div class="wizard">
+          <header class="wizard-header">
+            <h2 id="wizardTitle">Nuevo servidor</h2>
+            <button id="wizardClose" type="button" class="btn btn-ghost btn-icon" aria-label="Cerrar">×</button>
+          </header>
+          <div id="wizardBody" class="wizard-body"></div>
+          <footer class="wizard-footer">
+            <button id="wizardBack" type="button" class="btn btn-ghost">Atrás</button>
+            <button id="wizardNext" type="button" class="btn btn-accent">Siguiente</button>
+          </footer>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="renderer.js?v=20260916-2"></script>
+</body>
+</html>
