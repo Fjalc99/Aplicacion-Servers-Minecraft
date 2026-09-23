@@ -22,6 +22,9 @@ par de clics.
 - [Empaquetar como ejecutable](#empaquetar-como-ejecutable)
 - [Limitaciones conocidas](#limitaciones-conocidas)
 - [Fiabilidad: backups, reinicio automático y diagnóstico de caídas](#fiabilidad-backups-reinicio-automático-y-diagnóstico-de-caídas)
+- [Clonar un servidor como plantilla](#clonar-un-servidor-como-plantilla)
+- [Actualizaciones automáticas](#actualizaciones-automáticas)
+- [Tests e integración continua](#tests-e-integración-continua)
 - [Estructura del proyecto](#estructura-del-proyecto)
 - [Subir el proyecto a GitHub](#subir-el-proyecto-a-github)
 - [Pendiente](#pendiente)
@@ -139,6 +142,21 @@ Pestaña **Configuración** → tarjeta "Rendimiento":
 - **Aviso de RAM** — muestra la RAM total de tu PC y sugiere no pasarte de cierto
   límite si vas a jugar en la misma máquina que hostea el servidor.
 
+Pestaña **Resumen** → tarjeta "Rendimiento en vivo": dos gráficas (CPU y RAM)
+que se actualizan cada 2 segundos mientras el servidor está en marcha y muestran
+los últimos 3 minutos.
+
+- Mide el **proceso Java real**. En servidores Forge/NeoForge que arrancan con
+  `run.bat`/`run.sh`, el proceso que lanza la app es el intérprete del script
+  (`cmd.exe`/`bash`), así que la app baja por el árbol de procesos hasta encontrar
+  el `java` hijo. Por eso, justo al iniciar, puede aparecer unos segundos
+  "Localizando el proceso de Java…".
+- La CPU se muestra como porcentaje **del total del equipo** (100 % = todos los
+  núcleos al máximo).
+- La línea discontinua de la gráfica de RAM es la memoria asignada (`-Xmx`). Es
+  normal que el consumo real la supere un poco: la JVM usa memoria propia además
+  del heap.
+
 ## Red y puertos: jugar con amigos
 
 Esto es networking del propio Minecraft, no algo que la app resuelva por ti — pero
@@ -192,8 +210,9 @@ mover ahí el servidor — fuera del alcance de esta app, pero los mismos ficher
   te avisa antes: cerrar corta la tubería de consola del proceso Java, lo que puede
   hacer que el servidor se caiga. Si solo quieres liberar recursos, minimiza en vez
   de cerrar.
-- El menú de la bandeja (clic derecho en el icono) tiene "Mostrar ventana" y
-  "Salir" (con el mismo aviso de seguridad si hay servidores corriendo).
+- El menú de la bandeja (clic derecho en el icono) tiene "Mostrar ventana",
+  "Buscar actualizaciones" y "Salir" (con el mismo aviso de seguridad si hay
+  servidores corriendo).
 
 ## Empaquetar como ejecutable
 
@@ -205,6 +224,10 @@ npm run dist:win     # instalador .exe (NSIS) en dist/
 npm run dist:linux   # .AppImage en dist/
 npm run dist:mac     # .dmg en dist/ (solo compilando desde macOS)
 ```
+
+> Lo normal ya no es compilar a mano: al empujar un tag `vX.Y.Z`, GitHub Actions
+> compila los tres instaladores y los publica como Release (ver
+> [Actualizaciones automáticas](#actualizaciones-automáticas)).
 
 Notas:
 - Usa el icono incluido en `build/`. Si quieres tu propio icono, sustituye
@@ -226,7 +249,10 @@ Notas:
 - **NeoForge** solo existe para Minecraft 1.20.1 en adelante.
 - La detección de versión de Minecraft al importar un servidor existente es una
   aproximación; si no la encuentra, te pide que la escribas tú.
-- No hay gestión de copias de seguridad de mundo todavía.
+- **Auto-actualización en macOS**: electron-updater solo puede actualizar apps
+  de Mac firmadas con un certificado de Apple Developer. Sin firma, en Mac hay
+  que descargar la nueva versión a mano desde Releases. En Windows y Linux
+  (AppImage) funciona sin firma.
 - Carpetas gestionadas por funciones de seguridad de Windows (Acceso controlado a
   carpetas de Defender, OneDrive con "Copia de seguridad de carpetas") pueden dar
   errores genéricos al copiar ficheros; usa la opción de exportar a ZIP si te pasa esto.
@@ -241,7 +267,8 @@ src/
   downloader.js             Descarga de ficheros con progreso
   serverManager.js           Orquesta creación/importación de servidores
   serverProperties.js        Genera server.properties
-  javaProcess.js            Arranca/para el proceso Java y gestiona su consola
+  javaProcess.js            Arranca/para el proceso Java, gestiona su consola y mide CPU/RAM
+  processTree.js             Encuentra el PID real de java bajo run.bat/run.sh
   jvmFlags.js                Flags de JVM optimizados (Aikar's flags)
   modAnalyzer.js             Hash + consulta a Modrinth + copiado + diff de mods
   zipWriter.js                Generador/extractor de ZIP sin dependencias externas
@@ -253,6 +280,11 @@ renderer/
   index.html / style.css / renderer.js   Interfaz de usuario
 build/
   icon.png / tray-icon.png     Iconos de la app y de la bandeja
+  icon-512.png                 Icono para macOS (exige 512×512 como mínimo)
+test/                          Tests con node:test (npm test)
+.github/workflows/
+  test.yml                     Tests en cada push / pull request
+  release.yml                  Compila y publica los instaladores al empujar un tag vX.Y.Z
 ```
 
 ## Subir el proyecto a GitHub
@@ -374,6 +406,62 @@ carpeta `mods/` del servidor y se marca como:
 
 Así, en re-análisis sucesivos de un modpack grande, solo tienes que fijarte en
 lo que cambió en vez de repasar los cientos de mods cada vez.
+
+## Clonar un servidor como plantilla
+
+Pestaña **Resumen** → tarjeta "Usar como plantilla" → **Clonar como plantilla**.
+
+Abre el asistente normal de creación con todo ya rellenado a partir del servidor
+actual: tipo (Vanilla/Forge/NeoForge), versión de Minecraft y del loader,
+memoria, flags de JVM y **todo** su `server.properties`. Puedes cambiar cualquier
+cosa antes de crearlo. Después, el servidor se crea exactamente igual que uno
+nuevo (descarga, instalador, EULA…).
+
+- **No** se copian el mundo ni los mods: es una plantilla de configuración. Si
+  quieres los mismos mods, usa la pestaña Mods sobre el servidor nuevo.
+- El nombre propuesto es "<nombre> (copia)" y el **puerto se sube en 1**, para
+  que puedas tener los dos servidores encendidos a la vez sin que choquen.
+- Si el original era un servidor importado con versión "desconocida", el
+  asistente te pedirá elegir la versión de Minecraft.
+
+## Actualizaciones automáticas
+
+La app instalada usa **electron-updater** contra las Releases de GitHub del repo
+(`Fjalc99/Aplicacion-Servers-Minecraft`):
+
+- Al arrancar busca una versión nueva; si la hay, la descarga en segundo plano y
+  avisa con una notificación.
+- Cuando termina, pregunta si quieres reiniciar ya o dejarlo para más tarde (se
+  instala sola al cerrar la app). Si hay servidores en marcha, antes de reiniciar
+  sale el aviso de siempre.
+- Desde el menú de la bandeja: **Buscar actualizaciones** para comprobarlo a mano.
+- En desarrollo (`npm start`) no hace nada.
+
+Para publicar una versión nueva:
+
+```bash
+npm version patch          # o minor / major: sube package.json y crea el tag vX.Y.Z
+git push --follow-tags
+```
+
+El workflow `release.yml` compila en Windows, Linux y macOS, pasa los tests,
+comprueba que el tag coincide con `package.json` y publica la Release con los
+instaladores y los ficheros `latest*.yml` que necesita el actualizador. Usa el
+`GITHUB_TOKEN` automático del repo: no hay que configurar ningún secreto.
+
+## Tests e integración continua
+
+```bash
+npm test
+```
+
+Tests con el runner nativo de Node (`node:test`, sin dependencias extra) sobre
+la lógica que no depende de Electron: ZIP (crear/extraer), análisis y copia de
+mods, flags de JVM, diagnóstico de caídas, whitelist/ops/baneados, backups
+(crear, restaurar, podar) y el árbol de procesos.
+
+El workflow `test.yml` los ejecuta en Ubuntu y Windows en cada push y pull request,
+además de comprobar la sintaxis de todos los ficheros JavaScript.
 
 ## Pendiente
 

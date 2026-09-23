@@ -5,7 +5,12 @@ const state = {
   currentTab: 'overview',
   consoleBoundId: null,
   wizard: null,
+  // serverId -> [{ cpuPercent, memoryMb, memoryLimitMb, timestamp }]
+  usageHistory: new Map(),
 };
+
+const USAGE_POLL_MS = 2000;
+const USAGE_MAX_POINTS = 90; // 3 minutos a 2 s por punto
 
 const ICONS = {
   create: '<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M12 2L21 7V17L12 22L3 17V7L12 2Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><path d="M12 11V17M9 14H15" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>',
@@ -61,6 +66,9 @@ async function init() {
   } catch (error) {
     showNotice(`No se pudo cargar la lista de servidores: ${error.message}`);
   }
+
+  setInterval(pollResourceUsage, USAGE_POLL_MS);
+  window.addEventListener('resize', () => drawUsageCharts());
 }
 
 function showNotice(message) {
@@ -210,6 +218,20 @@ function renderOverview(server) {
   const el = document.getElementById('tab-overview');
   el.innerHTML = `
     <div class="card">
+      <h3>Rendimiento en vivo</h3>
+      <div class="usage-grid">
+        <div class="usage-chart">
+          <div class="usage-chart-head"><span>CPU</span><strong id="usageCpuValue">—</strong></div>
+          <canvas id="usageCpuCanvas" height="120"></canvas>
+        </div>
+        <div class="usage-chart">
+          <div class="usage-chart-head"><span>RAM</span><strong id="usageRamValue">—</strong></div>
+          <canvas id="usageRamCanvas" height="120"></canvas>
+        </div>
+      </div>
+      <p class="hint" id="usageHint">Servidor detenido.</p>
+    </div>
+    <div class="card">
       <h3>Información general</h3>
       <div class="kv-grid">
         <div class="kv"><span class="k">Tipo</span><span class="v">${labelForLoader(server.loader)}</span></div>
@@ -243,9 +265,17 @@ function renderOverview(server) {
       <div id="backupNowMsg" class="hint" style="margin-top:8px;"></div>
       <div id="backupsList" style="margin-top:14px;"><p class="hint">Cargando…</p></div>
     </div>
+    <div class="card">
+      <h3>Usar como plantilla</h3>
+      <p class="hint" style="margin-top:0;">Crea un servidor nuevo con la misma configuración (tipo, versión, memoria, flags de JVM y server.properties). No se copian el mundo ni los mods. Podrás revisar y cambiar todo antes de crearlo.</p>
+      <button id="cloneServerBtn" class="btn btn-ghost">Clonar como plantilla</button>
+    </div>
   `;
 
   refreshBackupsList(server);
+  drawUsageCharts();
+
+  document.getElementById('cloneServerBtn').addEventListener('click', () => openCloneWizard(server));
 
   document.getElementById('backupNowBtn').addEventListener('click', async () => {
     const btn = document.getElementById('backupNowBtn');
@@ -923,6 +953,7 @@ async function sendConsoleCommand() {
 
 async function onStart() {
   try {
+    state.usageHistory.set(state.selectedId, []);
     await window.api.startServer(state.selectedId);
     const server = await window.api.getServer(state.selectedId);
     await refreshStatus(server);
@@ -1019,6 +1050,33 @@ function openWizard() {
   renderWizardEntry();
 }
 
+/**
+ * Abre el asistente de creación normal, pero con los datos de un servidor
+ * existente ya rellenados. Reutiliza todo el flujo de creación (descarga,
+ * instalador, EULA, server.properties…); el mundo y los mods no se copian.
+ */
+function openCloneWizard(server) {
+  openWizard();
+  const data = defaultWizardData();
+  data.name = `${server.name} (copia)`;
+  data.loader = ['vanilla', 'forge', 'neoforge'].includes(server.loader) ? server.loader : 'vanilla';
+  // Los servidores importados pueden tener versión "desconocida": que la elija el usuario
+  data.mcVersion = /^\d+\.\d+/.test(server.mcVersion || '') ? server.mcVersion : '';
+  data.loaderVersion = data.loader === 'vanilla' ? '' : server.loaderVersion || '';
+  data.memory = server.memory || 2048;
+  data.optimizeJvm = server.optimizeJvm !== false;
+  data.properties = { ...data.properties, ...(server.properties || {}) };
+  // Mismo puerto que el original = no podrían estar los dos encendidos a la vez
+  const port = Number(data.properties['server-port']) || 25565;
+  data.properties['server-port'] = port < 65535 ? port + 1 : port - 1;
+
+  state.wizard.mode = 'create';
+  state.wizard.data = data;
+  state.wizard.stepStack = ['basics'];
+  state.wizard.cloneOf = server.name;
+  safeRenderWizardStep();
+}
+
 function closeWizard() {
   const overlay = document.getElementById('wizardOverlay');
   if (!overlay) return;
@@ -1104,12 +1162,13 @@ async function renderWizardStep() {
   nextBtn.disabled = false;
   nextBtn.hidden = false;
   backBtn.hidden = false;
-  backBtn.textContent = 'Atrás';
+  backBtn.textContent = state.wizard.stepStack.length <= 1 ? 'Cancelar' : 'Atrás';
   backBtn.onclick = goBack;
 
   const titleEl = document.getElementById('wizardTitle');
   if (step === 'entry') titleEl.textContent = 'Nuevo servidor';
   else if (state.wizard.mode === 'import') titleEl.textContent = 'Importar servidor existente';
+  else if (state.wizard.cloneOf) titleEl.textContent = `Clonar "${state.wizard.cloneOf}"`;
   else titleEl.textContent = 'Crear servidor nuevo';
 
   if (step === 'entry') {
@@ -1152,7 +1211,10 @@ async function renderWizardStep() {
         throw new Error('No hay versiones de Minecraft disponibles.');
       }
       state.wizard.versionsCache.vanilla = versions;
-      if (!state.wizard.data.mcVersion) state.wizard.data.mcVersion = versions[0].id;
+      if (!versions.some((v) => v.id === state.wizard.data.mcVersion)) {
+        state.wizard.data.mcVersion = versions[0].id;
+        state.wizard.data.loaderVersion = '';
+      }
       body.innerHTML = `
         <div class="field">
           <label>Versión de Minecraft</label>
@@ -1186,7 +1248,7 @@ async function renderWizardStep() {
         body.innerHTML = `<p class="error-text">No se han encontrado versiones de ${labelForLoader(state.wizard.data.loader)} para Minecraft ${state.wizard.data.mcVersion}. Prueba otra versión de Minecraft.</p>`;
         return;
       }
-      if (!state.wizard.data.loaderVersion) state.wizard.data.loaderVersion = versions[0];
+      if (!versions.includes(state.wizard.data.loaderVersion)) state.wizard.data.loaderVersion = versions[0];
       body.innerHTML = `
         <div class="field">
           <label>Versión de ${labelForLoader(state.wizard.data.loader)}</label>
@@ -1563,6 +1625,171 @@ async function runCreation() {
   await refreshServerList();
   closeWizard();
   selectServer(result.server.id);
+}
+
+// ---------------------------------------------------------------------------
+// Rendimiento en vivo (CPU / RAM)
+// ---------------------------------------------------------------------------
+
+let usagePollInFlight = false;
+
+async function pollResourceUsage() {
+  const id = state.selectedId;
+  if (!id || usagePollInFlight || document.hidden) return;
+  usagePollInFlight = true;
+  try {
+    const running = await window.api.isRunning(id);
+    if (!running) {
+      updateUsageLabels(id, false);
+      return;
+    }
+    const sample = await window.api.getResourceUsage(id);
+    if (sample) {
+      const history = state.usageHistory.get(id) || [];
+      history.push(sample);
+      if (history.length > USAGE_MAX_POINTS) history.splice(0, history.length - USAGE_MAX_POINTS);
+      state.usageHistory.set(id, history);
+    }
+    if (id === state.selectedId) {
+      updateUsageLabels(id, true, !sample);
+      drawUsageCharts();
+    }
+  } catch (e) {
+    // Un fallo puntual del sondeo no debe molestar al usuario
+  } finally {
+    usagePollInFlight = false;
+  }
+}
+
+function updateUsageLabels(id, running, locating = false) {
+  const hint = document.getElementById('usageHint');
+  if (!hint) return;
+  const history = state.usageHistory.get(id) || [];
+  const last = history[history.length - 1];
+  const cpuEl = document.getElementById('usageCpuValue');
+  const ramEl = document.getElementById('usageRamValue');
+
+  if (!running) {
+    hint.textContent = history.length ? 'Servidor detenido. Se muestran los últimos datos registrados.' : 'Servidor detenido.';
+    cpuEl.textContent = '—';
+    ramEl.textContent = '—';
+    return;
+  }
+  if (!last || locating) {
+    hint.textContent = 'Localizando el proceso de Java…';
+    if (!last) return;
+  } else {
+    hint.textContent = `Proceso Java PID ${last.pid}. CPU relativa al total del equipo; la RAM puede superar un poco el máximo asignado (-Xmx) por la memoria propia de la JVM.`;
+  }
+  cpuEl.textContent = `${last.cpuPercent.toFixed(1)} %`;
+  ramEl.textContent = `${Math.round(last.memoryMb)} / ${last.memoryLimitMb} MB`;
+}
+
+function cssVar(name, fallback) {
+  const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  return v || fallback;
+}
+
+function drawUsageCharts() {
+  const cpuCanvas = document.getElementById('usageCpuCanvas');
+  const ramCanvas = document.getElementById('usageRamCanvas');
+  if (!cpuCanvas || !ramCanvas || !state.selectedId) return;
+
+  const history = state.usageHistory.get(state.selectedId) || [];
+  const limit = history.length ? history[history.length - 1].memoryLimitMb : 0;
+  const maxRam = Math.max(limit, ...history.map((h) => h.memoryMb), 1) * 1.1;
+
+  drawLineChart(cpuCanvas, history.map((h) => h.cpuPercent), 100, {
+    color: cssVar('--accent', '#e8963f'),
+    formatY: (v) => `${Math.round(v)}%`,
+  });
+  drawLineChart(ramCanvas, history.map((h) => h.memoryMb), maxRam, {
+    color: cssVar('--ok', '#6fa85a'),
+    formatY: (v) => (v >= 1024 ? `${(v / 1024).toFixed(1)} GB` : `${Math.round(v)} MB`),
+    limitLine: limit || null,
+  });
+}
+
+/**
+ * Gráfica de líneas mínima sobre <canvas>, sin librerías. Ajusta la resolución
+ * al devicePixelRatio para que no se vea borrosa en pantallas HiDPI.
+ */
+function drawLineChart(canvas, values, maxValue, { color, formatY, limitLine = null }) {
+  const dpr = window.devicePixelRatio || 1;
+  const cssWidth = canvas.clientWidth || 300;
+  const cssHeight = canvas.clientHeight || 120;
+  if (canvas.width !== Math.round(cssWidth * dpr) || canvas.height !== Math.round(cssHeight * dpr)) {
+    canvas.width = Math.round(cssWidth * dpr);
+    canvas.height = Math.round(cssHeight * dpr);
+  }
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, cssWidth, cssHeight);
+
+  const padLeft = 52;
+  const padRight = 8;
+  const padTop = 8;
+  const padBottom = 8;
+  const w = cssWidth - padLeft - padRight;
+  const h = cssHeight - padTop - padBottom;
+  const yFor = (v) => padTop + h - (Math.min(v, maxValue) / maxValue) * h;
+
+  // Rejilla y etiquetas del eje Y
+  ctx.font = `11px ${cssVar('--font', 'sans-serif')}`;
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'middle';
+  for (let i = 0; i <= 4; i++) {
+    const v = (maxValue / 4) * i;
+    const y = yFor(v);
+    ctx.strokeStyle = cssVar('--border', '#2f333e');
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(padLeft, Math.round(y) + 0.5);
+    ctx.lineTo(padLeft + w, Math.round(y) + 0.5);
+    ctx.stroke();
+    ctx.fillStyle = cssVar('--text-faint', '#5c6273');
+    ctx.fillText(formatY(v), padLeft - 6, y);
+  }
+
+  // Línea del máximo asignado (-Xmx)
+  if (limitLine) {
+    const y = yFor(limitLine);
+    ctx.save();
+    ctx.setLineDash([4, 4]);
+    ctx.strokeStyle = cssVar('--text-muted', '#8a90a0');
+    ctx.beginPath();
+    ctx.moveTo(padLeft, y);
+    ctx.lineTo(padLeft + w, y);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  if (values.length < 2) {
+    ctx.fillStyle = cssVar('--text-faint', '#5c6273');
+    ctx.textAlign = 'center';
+    ctx.fillText('Esperando datos…', padLeft + w / 2, padTop + h / 2);
+    return;
+  }
+
+  // Los puntos se alinean a la derecha: el más reciente siempre en el borde
+  const step = w / (USAGE_MAX_POINTS - 1);
+  const xFor = (i) => padLeft + w - (values.length - 1 - i) * step;
+
+  ctx.beginPath();
+  values.forEach((v, i) => (i === 0 ? ctx.moveTo(xFor(i), yFor(v)) : ctx.lineTo(xFor(i), yFor(v))));
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 2;
+  ctx.lineJoin = 'round';
+  ctx.stroke();
+
+  // Relleno suave bajo la línea
+  ctx.lineTo(xFor(values.length - 1), padTop + h);
+  ctx.lineTo(xFor(0), padTop + h);
+  ctx.closePath();
+  ctx.globalAlpha = 0.15;
+  ctx.fillStyle = color;
+  ctx.fill();
+  ctx.globalAlpha = 1;
 }
 
 init();

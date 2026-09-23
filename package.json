@@ -3,15 +3,24 @@
   "version": "1.0.0",
   "description": "Gestor local de servidores de Minecraft (Vanilla / Forge / NeoForge) con detección automática de mods de servidor",
   "main": "main.js",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Fjalc99/Aplicacion-Servers-Minecraft.git"
+  },
   "scripts": {
     "start": "set ELECTRON_RUN_AS_NODE=&& electron .",
     "dist": "electron-builder",
     "dist:win": "electron-builder --win",
     "dist:linux": "electron-builder --linux",
-    "dist:mac": "electron-builder --mac"
+    "dist:mac": "electron-builder --mac",
+    "test": "node --test"
   },
   "author": "",
   "license": "MIT",
+  "dependencies": {
+    "electron-updater": "^6.3.9",
+    "pidusage": "^3.0.2"
+  },
   "devDependencies": {
     "electron": "^31.0.0",
     "electron-builder": "^24.13.3"
@@ -40,7 +49,19 @@
       "target": "AppImage"
     },
     "mac": {
-      "target": "dmg"
-    }
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "icon": "build/icon-512.png"
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "Fjalc99",
+        "repo": "Aplicacion-Servers-Minecraft",
+        "releaseType": "release"
+      }
+    ]
   }
 }

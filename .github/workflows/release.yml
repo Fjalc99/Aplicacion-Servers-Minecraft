@@ -1,0 +1,56 @@
+name: Release
+
+# Se dispara al empujar un tag de versión, p. ej.:
+#   npm version patch        (sube la versión en package.json y crea el tag vX.Y.Z)
+#   git push --follow-tags
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write # necesario para crear la Release y subir los instaladores
+
+jobs:
+  build:
+    name: Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: --win
+          - os: ubuntu-latest
+            target: --linux
+          - os: macos-latest
+            target: --mac
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm test
+
+      - name: Comprobar que el tag coincide con package.json
+        shell: bash
+        run: |
+          PKG_VERSION="v$(node -p "require('./package.json').version")"
+          if [ "$PKG_VERSION" != "${GITHUB_REF_NAME}" ]; then
+            echo "El tag (${GITHUB_REF_NAME}) no coincide con la versión de package.json ($PKG_VERSION)."
+            exit 1
+          fi
+
+      # electron-builder crea (o completa) una Release en borrador con el
+      # instalador y el latest*.yml que usa electron-updater para actualizar.
+      - name: Compilar y publicar
+        run: npx electron-builder ${{ matrix.target }} --publish always
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Sin certificado de firma: evita que electron-builder intente buscar uno en macOS
+          CSC_IDENTITY_AUTO_DISCOVERY: false

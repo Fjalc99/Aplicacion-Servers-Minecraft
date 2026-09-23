@@ -1,8 +1,9 @@
-const { spawn } = require('child_process');
+const { spawn, execFile } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const { buildJvmArgs } = require('./jvmFlags');
+const processTree = require('./processTree');
 
 // serverId -> { proc, intentionalStop, recentLog: string[], players: Set<string> }
 const running = new Map();
@@ -95,7 +96,18 @@ function startServer(server, callbacks = {}) {
   const { cmd, args, shell } = buildLaunchCommand(server);
   const proc = spawn(cmd, args, { cwd: server.dir, shell });
 
-  const entry = { proc, intentionalStop: false, recentLog: [], players: new Set(), ready: false };
+  const entry = {
+    proc,
+    intentionalStop: false,
+    recentLog: [],
+    players: new Set(),
+    ready: false,
+    // Con 'jar' el PID de spawn() ya es el de Java; con 'script' es el de
+    // cmd.exe/bash y hay que buscar el java hijo (ver getResourceUsage).
+    viaScript: server.launch.type === 'script',
+    javaPid: server.launch.type === 'script' ? null : proc.pid,
+    memoryLimitMb: server.memory || 2048,
+  };
   running.set(server.id, entry);
 
   const emit = (text) => {
@@ -127,12 +139,48 @@ function sendCommand(serverId, command) {
   entry.proc.stdin.write(command.trim() + '\n');
 }
 
+/**
+ * Mata el servidor de verdad. Con run.bat/run.sh, matar solo el PID de spawn()
+ * (cmd.exe / bash) dejaría el proceso java huérfano, con el puerto y el mundo
+ * bloqueados; por eso se mata también el java hijo.
+ */
+function forceKill(entry) {
+  const rootPid = entry.proc.pid;
+  if (!rootPid) return;
+
+  if (os.platform() === 'win32') {
+    // /T mata todo el árbol (cmd.exe -> java.exe)
+    execFile('taskkill', ['/pid', String(rootPid), '/T', '/F'], { windowsHide: true }, (err) => {
+      if (err) entry.proc.kill();
+    });
+    return;
+  }
+
+  const killJava = (pid) => {
+    if (pid && pid !== rootPid) {
+      try { process.kill(pid, 'SIGKILL'); } catch (e) { /* ya no existe */ }
+    }
+  };
+  if (!entry.viaScript) {
+    entry.proc.kill('SIGKILL');
+  } else if (entry.javaPid) {
+    killJava(entry.javaPid);
+    entry.proc.kill('SIGKILL');
+  } else {
+    processTree
+      .findJavaPid(rootPid)
+      .then(killJava)
+      .catch(() => {})
+      .finally(() => entry.proc.kill('SIGKILL'));
+  }
+}
+
 function stopServer(serverId, { force = false } = {}) {
   const entry = running.get(serverId);
   if (!entry) return;
   entry.intentionalStop = true;
   if (force) {
-    entry.proc.kill('SIGKILL');
+    forceKill(entry);
   } else {
     try {
       entry.proc.stdin.write('stop\n');
@@ -142,4 +190,50 @@ function stopServer(serverId, { force = false } = {}) {
   }
 }
 
-module.exports = { startServer, stopServer, sendCommand, isRunning, getPlayers };
+/**
+ * Uso de CPU y RAM del proceso Java real del servidor.
+ * Devuelve null si el servidor no está en marcha o si aún no se ha podido
+ * localizar el proceso java (p. ej. justo tras arrancar vía run.bat).
+ *
+ * cpuPercent está normalizado al total de la máquina (0-100), no a un núcleo.
+ */
+async function getResourceUsage(serverId) {
+  const entry = running.get(serverId);
+  if (!entry || !entry.proc.pid) return null;
+
+  if (!entry.javaPid) {
+    // Evita lanzar PowerShell/ps en cada sondeo si ya se está buscando
+    if (entry.resolvingPid) return null;
+    entry.resolvingPid = true;
+    try {
+      entry.javaPid = await processTree.findJavaPid(entry.proc.pid);
+    } catch (e) {
+      entry.javaPid = null;
+    } finally {
+      entry.resolvingPid = false;
+    }
+    if (!entry.javaPid || !running.has(serverId)) return null;
+  }
+
+  // Carga perezosa: así los tests y el resto de módulos no dependen de pidusage
+  const pidusage = require('pidusage');
+  let stats;
+  try {
+    stats = await pidusage(entry.javaPid);
+  } catch (e) {
+    // El java puede haber muerto/reiniciado (Forge relanza a veces): reintentar la búsqueda
+    if (entry.viaScript) entry.javaPid = null;
+    return null;
+  }
+
+  const cores = os.cpus().length || 1;
+  return {
+    pid: entry.javaPid,
+    cpuPercent: Math.min(100, stats.cpu / cores),
+    memoryMb: stats.memory / 1024 / 1024,
+    memoryLimitMb: entry.memoryLimitMb,
+    timestamp: Date.now(),
+  };
+}
+
+module.exports = { startServer, stopServer, sendCommand, isRunning, getPlayers, getResourceUsage };

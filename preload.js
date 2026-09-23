@@ -32,6 +32,7 @@ contextBridge.exposeInMainWorld('api', {
   sendCommand: (id, command) => ipcRenderer.invoke('servers:sendCommand', { id, command }),
   isRunning: (id) => ipcRenderer.invoke('servers:isRunning', id),
   getPlayers: (id) => ipcRenderer.invoke('servers:getPlayers', id),
+  getResourceUsage: (id) => ipcRenderer.invoke('servers:resourceUsage', id),
   onLog: (id, cb) => ipcRenderer.on(`servers:log:${id}`, (e, line) => cb(line)),
   onExit: (id, cb) => ipcRenderer.on(`servers:exit:${id}`, (e, payload) => cb(payload)),
   onPlayersChange: (id, cb) => ipcRenderer.on(`servers:players:${id}`, (e, players) => cb(players)),
