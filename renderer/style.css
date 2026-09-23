@@ -589,3 +589,34 @@ input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--accent);
   .loader-options { flex-direction: column; }
   .server-actions { align-items: flex-start; }
 }
+
+/* ---------- Rendimiento en vivo ---------- */
+.usage-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 14px;
+}
+.usage-chart {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px 8px;
+}
+.usage-chart-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  font-size: 12.5px;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+}
+.usage-chart-head strong {
+  color: var(--text);
+  font-family: var(--mono);
+  font-weight: 600;
+}
+.usage-chart canvas {
+  display: block;
+  width: 100%;
+  height: 120px;
+}

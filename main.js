@@ -12,6 +12,16 @@ const backupManager = require('./src/backupManager');
 const crashDiagnostics = require('./src/crashDiagnostics');
 const playerFiles = require('./src/playerFiles');
 
+// electron-updater solo tiene sentido en la app empaquetada (en desarrollo no
+// hay app-update.yml). Se carga con try para que un fallo aquí nunca impida
+// arrancar la aplicación.
+let autoUpdater = null;
+try {
+  ({ autoUpdater } = require('electron-updater'));
+} catch (e) {
+  autoUpdater = null;
+}
+
 let mainWindow;
 let tray = null;
 
@@ -158,6 +168,64 @@ function confirmQuitIfServersRunning() {
   return choice === 1;
 }
 
+// ---------- Auto-actualización (GitHub Releases) ----------
+
+let updateCheckIsManual = false;
+
+function setupAutoUpdater() {
+  if (!autoUpdater || !app.isPackaged) return;
+
+  autoUpdater.autoDownload = true;
+  autoUpdater.autoInstallOnAppQuit = true;
+
+  autoUpdater.on('update-available', (info) => {
+    notify('Actualización disponible', `Descargando la versión ${info.version} en segundo plano…`);
+  });
+
+  autoUpdater.on('update-not-available', () => {
+    if (updateCheckIsManual) notify('Sin actualizaciones', `Ya tienes la última versión (${app.getVersion()}).`);
+    updateCheckIsManual = false;
+  });
+
+  autoUpdater.on('error', (err) => {
+    if (updateCheckIsManual) notify('No se pudo buscar actualizaciones', err ? err.message : 'Error desconocido');
+    updateCheckIsManual = false;
+  });
+
+  autoUpdater.on('update-downloaded', async (info) => {
+    updateCheckIsManual = false;
+    notify('Actualización lista', `La versión ${info.version} se instalará al cerrar la aplicación.`);
+    if (!mainWindow) return;
+    const { response } = await dialog.showMessageBox(mainWindow, {
+      type: 'info',
+      buttons: ['Reiniciar ahora', 'Más tarde'],
+      defaultId: 1,
+      cancelId: 1,
+      title: 'Actualización descargada',
+      message: `La versión ${info.version} está lista para instalarse.`,
+      detail: 'Si eliges "Más tarde", se instalará automáticamente la próxima vez que cierres la aplicación.',
+    });
+    if (response === 0 && confirmQuitIfServersRunning()) {
+      app.isQuiting = true;
+      autoUpdater.quitAndInstall();
+    }
+  });
+
+  autoUpdater.checkForUpdates().catch(() => {});
+}
+
+function checkForUpdatesManually() {
+  if (!autoUpdater || !app.isPackaged) {
+    notify('Actualizaciones', 'La búsqueda de actualizaciones solo funciona en la versión instalada de la aplicación.');
+    return;
+  }
+  updateCheckIsManual = true;
+  autoUpdater.checkForUpdates().catch((err) => {
+    notify('No se pudo buscar actualizaciones', err.message);
+    updateCheckIsManual = false;
+  });
+}
+
 function createTray() {
   const icon = nativeImage.createFromPath(path.join(__dirname, 'build', 'tray-icon.png'));
   tray = new Tray(icon);
@@ -165,6 +233,7 @@ function createTray() {
 
   const menu = Menu.buildFromTemplate([
     { label: 'Mostrar ventana', click: () => { mainWindow.show(); mainWindow.focus(); } },
+    { label: 'Buscar actualizaciones', click: () => checkForUpdatesManually() },
     { type: 'separator' },
     {
       label: 'Salir',
@@ -189,6 +258,7 @@ app.whenReady().then(async () => {
   await session.defaultSession.clearCache();
   createWindow();
   createTray();
+  setupAutoUpdater();
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
     else mainWindow.show();
@@ -321,6 +391,7 @@ ipcMain.handle('servers:sendCommand', (e, { id, command }) => {
 
 ipcMain.handle('servers:isRunning', (e, id) => javaProcess.isRunning(id));
 ipcMain.handle('servers:getPlayers', (e, id) => javaProcess.getPlayers(id));
+ipcMain.handle('servers:resourceUsage', (e, id) => javaProcess.getResourceUsage(id));
 
 ipcMain.handle('servers:updateAutoRestart', (e, { id, enabled }) =>
   serverManager.updateAutoRestart(id, enabled)
