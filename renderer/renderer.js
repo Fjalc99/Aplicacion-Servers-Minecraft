@@ -413,33 +413,58 @@ function renderModsTable(server) {
     return '<span class="badge badge-unknown">No identificado</span>';
   };
 
-  const rows = lastModAnalysis
-    .map(
-      (m, i) => `
+  const row = (m, i, checkClass) => `
       <tr>
-        <td><input type="checkbox" class="modCheck" data-i="${i}" ${m.status !== 'client-only' ? 'checked' : ''} /></td>
+        <td><input type="checkbox" class="${checkClass}" data-i="${i}" checked /></td>
         <td>${escapeHtml(m.name)}</td>
         <td>${badge(m.status)}</td>
         <td>${m.modrinthUrl ? `<a href="${m.modrinthUrl}" target="_blank">Modrinth</a>` : '—'}</td>
-      </tr>`
-    )
+      </tr>`;
+
+  const serverRows = lastModAnalysis
+    .map((m, i) => ({ m, i }))
+    .filter(({ m }) => m.status !== 'client-only')
+    .map(({ m, i }) => row(m, i, 'modCheckServer'))
+    .join('');
+
+  const clientRows = lastModAnalysis
+    .map((m, i) => ({ m, i }))
+    .filter(({ m }) => m.status === 'client-only')
+    .map(({ m, i }) => row(m, i, 'modCheckClient'))
     .join('');
 
   container.innerHTML = `
+    <h3 style="margin-top:0;">Mods para el servidor (${serverRows ? serverRows.split('<tr>').length - 1 : 0})</h3>
+    ${serverRows ? `
     <table class="mods-table">
       <thead><tr><th>Copiar</th><th>Mod</th><th>Estado</th><th></th></tr></thead>
-      <tbody>${rows}</tbody>
+      <tbody>${serverRows}</tbody>
     </table>
     <div style="display:flex; gap:10px; flex-wrap:wrap; margin-top:14px;">
       <button id="applyModsBtn" class="btn btn-accent">Copiar seleccionados a la carpeta mods del servidor</button>
-      <button id="exportZipBtn" class="btn btn-ghost">Generar ZIP con los seleccionados</button>
+      <button id="exportServerZipBtn" class="btn btn-ghost">Generar ZIP con los seleccionados</button>
     </div>
-    <div id="applyModsResult" class="hint" style="margin-top:8px;"></div>
+    ` : '<p class="hint">Ninguno de los mods analizados hace falta en el servidor.</p>'}
+
+    <h3 style="margin-top:26px;">Mods solo de cliente (${clientRows ? clientRows.split('<tr>').length - 1 : 0})</h3>
+    ${clientRows ? `
+    <p class="hint" style="margin-top:0;">Estos mods no van al servidor (son de interfaz/gráficos/etc. y el servidor los rechazaría o los ignoraría). Aquí los tienes aparte por si quieres, por ejemplo, generar el pack de cliente para tus amigos.</p>
+    <table class="mods-table">
+      <thead><tr><th>Incluir</th><th>Mod</th><th>Estado</th><th></th></tr></thead>
+      <tbody>${clientRows}</tbody>
+    </table>
+    <div style="display:flex; gap:10px; flex-wrap:wrap; margin-top:14px;">
+      <button id="exportClientZipBtn" class="btn btn-ghost">Generar ZIP con los mods de cliente</button>
+    </div>
+    ` : '<p class="hint">No se ha detectado ningún mod exclusivo de cliente en esta carpeta.</p>'}
+
+    <div id="applyModsResult" class="hint" style="margin-top:14px;"></div>
   `;
 
-  document.getElementById('applyModsBtn').addEventListener('click', async () => {
+  const applyModsBtn = document.getElementById('applyModsBtn');
+  if (applyModsBtn) applyModsBtn.addEventListener('click', async () => {
     try {
-      const checked = [...document.querySelectorAll('.modCheck')]
+      const checked = [...document.querySelectorAll('.modCheckServer')]
         .filter((c) => c.checked)
         .map((c) => lastModAnalysis[Number(c.dataset.i)]);
       const result = await window.api.applyMods(server.id, checked, true);
@@ -471,10 +496,10 @@ function renderModsTable(server) {
     }
   });
 
-  document.getElementById('exportZipBtn').addEventListener('click', async () => {
+  async function exportZip(checkboxClass, destinationHint) {
     const resultEl = document.getElementById('applyModsResult');
     try {
-      const checked = [...document.querySelectorAll('.modCheck')]
+      const checked = [...document.querySelectorAll(`.${checkboxClass}`)]
         .filter((c) => c.checked)
         .map((c) => lastModAnalysis[Number(c.dataset.i)]);
 
@@ -499,7 +524,7 @@ function renderModsTable(server) {
       resultEl.innerHTML = `
         ZIP creado con ${result.count} mods (${mb} MB):<br>
         <strong>${escapeHtml(result.zipPath)}</strong><br>
-        <span class="hint">Descomprímelo y copia su contenido dentro de la carpeta <code>mods</code> de tu servidor.</span>
+        <span class="hint">${destinationHint}</span>
         <br><button id="showZipBtn" class="btn btn-ghost" style="margin-top:8px;">Mostrar en la carpeta</button>
       `;
       document.getElementById('showZipBtn').addEventListener('click', () => {
@@ -509,7 +534,17 @@ function renderModsTable(server) {
       resultEl.innerHTML = `<span class="error-text">Error: ${escapeHtml(error.message)}</span>`;
       showNotice(`No se pudo generar el ZIP: ${error.message}`);
     }
-  });
+  }
+
+  const exportServerZipBtn = document.getElementById('exportServerZipBtn');
+  if (exportServerZipBtn) exportServerZipBtn.addEventListener('click', () =>
+    exportZip('modCheckServer', 'Descomprímelo y copia su contenido dentro de la carpeta mods de tu servidor.')
+  );
+
+  const exportClientZipBtn = document.getElementById('exportClientZipBtn');
+  if (exportClientZipBtn) exportClientZipBtn.addEventListener('click', () =>
+    exportZip('modCheckClient', 'Este ZIP es para el pack de cliente (repártelo a tus amigos), no va en la carpeta mods del servidor.')
+  );
 }
 
 // ---------------------------------------------------------------------------
