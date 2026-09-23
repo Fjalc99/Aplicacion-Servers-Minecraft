@@ -147,6 +147,8 @@ async function createServer(options, onProgress) {
     dir,
     memory: Number(options.memory),
     optimizeJvm: options.optimizeJvm !== false,
+    autoRestart: false,
+    autoBackup: { onStop: false, everyHours: 0 },
     properties,
     launch,
     createdAt: new Date().toISOString(),
@@ -198,6 +200,25 @@ function updateOptimizeJvm(id, enabled) {
   const server = store.getServer(id);
   if (!server) throw new Error('Servidor no encontrado');
   server.optimizeJvm = Boolean(enabled);
+  store.saveServer(server);
+  return server;
+}
+
+function updateAutoRestart(id, enabled) {
+  const server = store.getServer(id);
+  if (!server) throw new Error('Servidor no encontrado');
+  server.autoRestart = Boolean(enabled);
+  store.saveServer(server);
+  return server;
+}
+
+function updateAutoBackup(id, settings) {
+  const server = store.getServer(id);
+  if (!server) throw new Error('Servidor no encontrado');
+  server.autoBackup = {
+    onStop: Boolean(settings.onStop),
+    everyHours: settings.everyHours ? Number(settings.everyHours) : 0,
+  };
   store.saveServer(server);
   return server;
 }
@@ -357,6 +378,8 @@ function importServer(options) {
     dir: options.folderPath,
     memory: options.memory || 2048,
     optimizeJvm: options.optimizeJvm !== false,
+    autoRestart: false,
+    autoBackup: { onStop: false, everyHours: 0 },
     properties,
     launch: detection.launch,
     imported: true,
@@ -420,6 +443,8 @@ module.exports = {
   updateProperties,
   updateMemory,
   updateOptimizeJvm,
+  updateAutoRestart,
+  updateAutoBackup,
   applyPerformancePreset,
   checkJava,
   detectExistingServer,

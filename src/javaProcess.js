@@ -4,11 +4,21 @@ const fs = require('fs');
 const os = require('os');
 const { buildJvmArgs } = require('./jvmFlags');
 
-// serverId -> { proc, listeners: Set<fn> }
+// serverId -> { proc, intentionalStop, recentLog: string[], players: Set<string> }
 const running = new Map();
+
+const MAX_LOG_LINES = 400;
+const READY_PATTERN = /\]: Done \(/;
+const JOIN_PATTERN = /(?:\[[^\]]*\]:?\s*)?(\w+) joined the game/;
+const LEAVE_PATTERN = /(?:\[[^\]]*\]:?\s*)?(\w+) left the game/;
 
 function isRunning(serverId) {
   return running.has(serverId);
+}
+
+function getPlayers(serverId) {
+  const entry = running.get(serverId);
+  return entry ? [...entry.players] : [];
 }
 
 function buildLaunchCommand(server) {
@@ -46,49 +56,90 @@ function buildLaunchCommand(server) {
   };
 }
 
-function startServer(server, onLog, onExit) {
+function pushLogLines(entry, text) {
+  const lines = text.split(/\r?\n/).filter((l) => l.length > 0);
+  let playersChanged = false;
+  let becameReady = false;
+
+  for (const line of lines) {
+    entry.recentLog.push(line);
+    if (entry.recentLog.length > MAX_LOG_LINES) entry.recentLog.shift();
+
+    if (!entry.ready && READY_PATTERN.test(line)) {
+      entry.ready = true;
+      becameReady = true;
+    }
+
+    const joined = line.match(JOIN_PATTERN);
+    if (joined) {
+      entry.players.add(joined[1]);
+      playersChanged = true;
+    }
+    const left = line.match(LEAVE_PATTERN);
+    if (left) {
+      entry.players.delete(left[1]);
+      playersChanged = true;
+    }
+  }
+
+  return { playersChanged, becameReady };
+}
+
+/**
+ * callbacks: { onLog(line), onExit({ code, crashed, recentLogText }), onReady(), onPlayersChange(players) }
+ */
+function startServer(server, callbacks = {}) {
+  const { onLog, onExit, onReady, onPlayersChange } = callbacks;
   if (running.has(server.id)) return;
 
   const { cmd, args, shell } = buildLaunchCommand(server);
   const proc = spawn(cmd, args, { cwd: server.dir, shell });
 
-  const emit = (line) => {
-    if (onLog) onLog(line);
+  const entry = { proc, intentionalStop: false, recentLog: [], players: new Set(), ready: false };
+  running.set(server.id, entry);
+
+  const emit = (text) => {
+    if (onLog) onLog(text);
+    const { playersChanged, becameReady } = pushLogLines(entry, text);
+    if (becameReady && onReady) onReady();
+    if (playersChanged && onPlayersChange) onPlayersChange([...entry.players]);
   };
 
   proc.stdout.on('data', (data) => emit(data.toString()));
   proc.stderr.on('data', (data) => emit(data.toString()));
   proc.on('exit', (code) => {
+    const wasIntentional = entry.intentionalStop;
+    const recentLogText = entry.recentLog.join('\n');
     running.delete(server.id);
-    if (onExit) onExit(code);
+    if (onExit) onExit({ code, crashed: !wasIntentional, recentLogText });
   });
   proc.on('error', (err) => {
+    const recentLogText = entry.recentLog.join('\n');
     running.delete(server.id);
     emit(`\n[ERROR] No se pudo iniciar el proceso: ${err.message}\n`);
-    if (onExit) onExit(null);
+    if (onExit) onExit({ code: null, crashed: true, recentLogText });
   });
-
-  running.set(server.id, proc);
 }
 
 function sendCommand(serverId, command) {
-  const proc = running.get(serverId);
-  if (!proc) throw new Error('El servidor no está en ejecución');
-  proc.stdin.write(command.trim() + '\n');
+  const entry = running.get(serverId);
+  if (!entry) throw new Error('El servidor no está en ejecución');
+  entry.proc.stdin.write(command.trim() + '\n');
 }
 
 function stopServer(serverId, { force = false } = {}) {
-  const proc = running.get(serverId);
-  if (!proc) return;
+  const entry = running.get(serverId);
+  if (!entry) return;
+  entry.intentionalStop = true;
   if (force) {
-    proc.kill('SIGKILL');
+    entry.proc.kill('SIGKILL');
   } else {
     try {
-      proc.stdin.write('stop\n');
+      entry.proc.stdin.write('stop\n');
     } catch (e) {
-      proc.kill();
+      entry.proc.kill();
     }
   }
 }
 
-module.exports = { startServer, stopServer, sendCommand, isRunning };
+module.exports = { startServer, stopServer, sendCommand, isRunning, getPlayers };

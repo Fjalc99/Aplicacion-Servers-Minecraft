@@ -12,6 +12,9 @@ contextBridge.exposeInMainWorld('api', {
   updateProperties: (id, properties) => ipcRenderer.invoke('servers:updateProperties', { id, properties }),
   updateMemory: (id, memory) => ipcRenderer.invoke('servers:updateMemory', { id, memory }),
   updateOptimizeJvm: (id, enabled) => ipcRenderer.invoke('servers:updateOptimizeJvm', { id, enabled }),
+  updateAutoRestart: (id, enabled) => ipcRenderer.invoke('servers:updateAutoRestart', { id, enabled }),
+  updateAutoBackup: (id, onStop, everyHours) =>
+    ipcRenderer.invoke('servers:updateAutoBackup', { id, onStop, everyHours }),
   applyPerformancePreset: (id) => ipcRenderer.invoke('servers:applyPerformancePreset', id),
   getSystemMemory: () => ipcRenderer.invoke('servers:systemMemory'),
   openServerFolder: (id) => ipcRenderer.invoke('servers:openFolder', id),
@@ -28,12 +31,23 @@ contextBridge.exposeInMainWorld('api', {
   stopServer: (id, force) => ipcRenderer.invoke('servers:stop', { id, force }),
   sendCommand: (id, command) => ipcRenderer.invoke('servers:sendCommand', { id, command }),
   isRunning: (id) => ipcRenderer.invoke('servers:isRunning', id),
+  getPlayers: (id) => ipcRenderer.invoke('servers:getPlayers', id),
   onLog: (id, cb) => ipcRenderer.on(`servers:log:${id}`, (e, line) => cb(line)),
-  onExit: (id, cb) => ipcRenderer.on(`servers:exit:${id}`, (e, code) => cb(code)),
+  onExit: (id, cb) => ipcRenderer.on(`servers:exit:${id}`, (e, payload) => cb(payload)),
+  onPlayersChange: (id, cb) => ipcRenderer.on(`servers:players:${id}`, (e, players) => cb(players)),
   removeLogListeners: (id) => {
     ipcRenderer.removeAllListeners(`servers:log:${id}`);
     ipcRenderer.removeAllListeners(`servers:exit:${id}`);
+    ipcRenderer.removeAllListeners(`servers:players:${id}`);
   },
+
+  // Backups
+  listBackups: (id) => ipcRenderer.invoke('servers:listBackups', id),
+  createBackup: (id) => ipcRenderer.invoke('servers:createBackup', id),
+  restoreBackup: (id, fileName) => ipcRenderer.invoke('servers:restoreBackup', { id, fileName }),
+  deleteBackup: (id, fileName) => ipcRenderer.invoke('servers:deleteBackup', { id, fileName }),
+  onBackupProgress: (id, cb) => ipcRenderer.on(`servers:backupProgress:${id}`, (e, info) => cb(info)),
+  removeBackupProgressListeners: (id) => ipcRenderer.removeAllListeners(`servers:backupProgress:${id}`),
 
   // Catálogo
   listVanillaVersions: () => ipcRenderer.invoke('catalog:vanillaVersions'),
@@ -41,12 +55,19 @@ contextBridge.exposeInMainWorld('api', {
   getForgeRecommended: (mcVersion) => ipcRenderer.invoke('catalog:forgeRecommended', mcVersion),
   listNeoForgeVersions: (mcVersion) => ipcRenderer.invoke('catalog:neoforgeVersions', mcVersion),
 
+  // Whitelist / ops / baneados
+  readPlayerList: (id, kind) => ipcRenderer.invoke('servers:readPlayerList', { id, kind }),
+  removeFromPlayerList: (id, kind, name) =>
+    ipcRenderer.invoke('servers:removeFromPlayerList', { id, kind, name }),
+
   // Mods
   pickModsFolder: () => ipcRenderer.invoke('mods:pickFolder'),
-  analyzeMods: (folder) => ipcRenderer.invoke('mods:analyze', folder),
+  analyzeMods: (folder, serverId) => ipcRenderer.invoke('mods:analyze', { folder, serverId }),
   applyMods: (serverId, results, includeUnknown) =>
     ipcRenderer.invoke('mods:apply', { serverId, results, includeUnknown }),
   exportModsZip: (serverId, results) =>
     ipcRenderer.invoke('mods:exportZip', { serverId, results }),
   showInFolder: (filePath) => ipcRenderer.invoke('mods:showInFolder', filePath),
+  onModsExportProgress: (cb) => ipcRenderer.on('mods:exportProgress', (e, info) => cb(info)),
+  removeModsExportProgressListeners: () => ipcRenderer.removeAllListeners('mods:exportProgress'),
 });

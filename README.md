@@ -21,8 +21,10 @@ par de clics.
 - [Bandeja del sistema](#bandeja-del-sistema)
 - [Empaquetar como ejecutable](#empaquetar-como-ejecutable)
 - [Limitaciones conocidas](#limitaciones-conocidas)
+- [Fiabilidad: backups, reinicio automático y diagnóstico de caídas](#fiabilidad-backups-reinicio-automático-y-diagnóstico-de-caídas)
 - [Estructura del proyecto](#estructura-del-proyecto)
 - [Subir el proyecto a GitHub](#subir-el-proyecto-a-github)
+- [Pendiente](#pendiente)
 
 ## Requisitos
 
@@ -97,7 +99,8 @@ Tienes dos formas de llevar los mods al servidor:
   carpeta `mods/` del servidor. Te dice cuántos son nuevos y cuántos ya existían.
 - **Generar un ZIP** — si Windows bloquea la escritura directa en esa carpeta
   (típico si está en Escritorio con "Acceso controlado a carpetas" activado, o con
-  ciertos antivirus), usa "Generar ZIP con los seleccionados": eliges dónde
+  ciertos antivirus), usa "Generar ZIP con los seleccionados" (con barra de
+  progreso y tiempo restante estimado, igual que los backups): eliges dónde
   guardarlo y luego lo descomprimes tú mismo dentro de `mods/`.
 
 ### Importar un mundo existente
@@ -240,8 +243,11 @@ src/
   serverProperties.js        Genera server.properties
   javaProcess.js            Arranca/para el proceso Java y gestiona su consola
   jvmFlags.js                Flags de JVM optimizados (Aikar's flags)
-  modAnalyzer.js             Hash + consulta a Modrinth + copiado de mods
-  zipWriter.js                Generador de ZIP sin dependencias externas
+  modAnalyzer.js             Hash + consulta a Modrinth + copiado + diff de mods
+  zipWriter.js                Generador/extractor de ZIP sin dependencias externas
+  backupManager.js            Crear, listar, restaurar y borrar backups del mundo
+  crashDiagnostics.js          Traduce el log de una caída a un mensaje en español
+  playerFiles.js               Lectura/edición de whitelist.json, ops.json, banned-players.json
   store.js / paths.js          Persistencia de la lista de servidores
 renderer/
   index.html / style.css / renderer.js   Interfaz de usuario
@@ -285,3 +291,93 @@ Para seguir desarrollando de forma ordenada a partir de aquí:
 - Si quieres compilar instaladores automáticamente en cada versión, GitHub Actions
   puede ejecutar `npm run dist:win`/`dist:linux` en cada tag y publicar el
   resultado como "Release".
+
+## Fiabilidad: backups, reinicio automático y diagnóstico de caídas
+
+> Rama sugerida para probar esto antes de fusionarlo a `main`: `git checkout -b fiabilidad-backups-reinicio`.
+
+### Copias de seguridad del mundo
+
+Pestaña **Resumen** → tarjeta "Copias de seguridad":
+
+- **Backup ahora** — comprime la carpeta del mundo tal cual está en ese momento en
+  `backups/backup-<mundo>-<fecha>.zip`, dentro de la carpeta del servidor. Se
+  conservan automáticamente las 10 copias más recientes; las más antiguas se
+  eliminan solas. Muestra una barra de progreso real (por bytes procesados, no
+  solo un giro indefinido) con una estimación del tiempo restante.
+- **Restaurar** — sustituye el mundo actual por el contenido del backup elegido.
+  El mundo que hubiera antes de restaurar **no se borra**: se renombra con un
+  sufijo `.antes-de-restaurar-<fecha>` por si hace falta recuperarlo. No se puede
+  restaurar con el servidor en marcha.
+- **Eliminar** — borra un backup concreto que ya no necesites.
+
+Desde pestaña **Configuración** → tarjeta "Fiabilidad" puedes activar backups
+automáticos:
+- Al detener el servidor (se hace justo después de que el proceso termine de
+  guardar el mundo por sí mismo, para no pillarlo a medio guardar).
+- Cada X horas mientras el servidor está en marcha (0 = desactivado).
+
+### Reinicio automático si el servidor se cae solo
+
+También en la tarjeta "Fiabilidad": si activas "Reiniciar automáticamente si el
+servidor se cae solo", cuando el proceso termine sin que hayas pulsado
+"Detener" tú (un crash), la app espera 5 segundos y lo vuelve a arrancar sola.
+Si detienes el servidor tú mismo desde el botón o con `/stop`, no cuenta como
+caída y no se reinicia solo.
+
+### Diagnóstico de caídas en lenguaje normal
+
+Cuando el proceso termina inesperadamente, la app revisa el log reciente en
+busca de patrones habituales (falta de memoria, puerto ocupado, conflicto entre
+mods, EULA no aceptado, versión de Java demasiado antigua) y te muestra un
+mensaje corto en la Consola y como notificación de escritorio, en vez de un
+stacktrace de Java sin traducir. Si no reconoce el patrón, te dice que revises
+el log completo.
+
+### Jugadores conectados
+
+Pestaña **Consola**: panel lateral con los jugadores conectados ahora mismo
+(detectado leyendo el propio log de "joined/left the game"), con botones
+directos de **OP**, **Kick** y **Ban** — equivalen a escribir `/op`, `/kick` y
+`/ban` a mano, pero sin tener que teclear el comando.
+
+### Notificaciones de escritorio
+
+La app lanza una notificación del sistema cuando el servidor termina de
+arrancar (detecta el "Done (" típico del log) y cuando se cae inesperadamente
+(con el diagnóstico incluido en la propia notificación).
+
+### Whitelist, operadores y baneados en tabla
+
+En el mismo panel lateral de la pestaña **Consola**, debajo de los jugadores
+conectados, hay tres pestañas — Whitelist / Operadores / Baneados — que leen
+directamente `whitelist.json`, `ops.json` y `banned-players.json` y los
+muestran como una lista con un botón "Quitar" en cada fila, en vez de tener que
+abrir esos ficheros a mano.
+
+- Si el servidor está **parado**, "Quitar" edita el fichero JSON directamente.
+- Si está **en marcha**, "Quitar" envía el comando equivalente (`whitelist
+  remove`, `deop`, `pardon`) para que el cambio se aplique al momento.
+- Para **añadir** alguien, usa los botones OP / Kick / Ban de la lista de
+  jugadores conectados (arriba del todo) mientras esa persona esté en el
+  servidor — es la forma fiable de que Minecraft resuelva su UUID correctamente.
+
+### Mods: solo lo que cambió desde la última vez
+
+Al analizar una carpeta de mods de cliente para un servidor que ya tenía mods
+copiados, cada resultado se compara por hash contra lo que YA hay en la
+carpeta `mods/` del servidor y se marca como:
+- **Nuevo** — no existía en el servidor.
+- **Actualización** — existe con ese nombre pero el contenido es distinto (versión nueva).
+- **Ya está igual** — el archivo es idéntico; no hace falta volver a copiarlo
+  (viene desmarcado por defecto para que no lo recopies sin querer).
+
+Así, en re-análisis sucesivos de un modpack grande, solo tienes que fijarte en
+lo que cambió en vez de repasar los cientos de mods cada vez.
+
+## Pendiente
+
+Queda fuera de esta tanda, tal y como se habló: una segunda fuente de
+identificación de mods vía la API de CurseForge, para los casos que Modrinth no
+reconoce. Necesita una clave de API propia (de pago), así que se deja para
+cuando/si se decide dar ese paso.

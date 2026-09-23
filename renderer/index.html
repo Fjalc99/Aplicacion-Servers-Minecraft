@@ -76,13 +76,28 @@
         <section id="tab-config" class="tab-panel" hidden></section>
         <section id="tab-mods" class="tab-panel" hidden></section>
         <section id="tab-console" class="tab-panel">
-          <div class="console-log" id="consoleLog"></div>
-          <div class="console-input-row">
-            <input id="consoleInput" type="text" placeholder="Escribe un comando y pulsa Enter…" disabled />
-            <button id="consoleSend" type="button" class="btn btn-accent" disabled>
-              <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M4 20L20 12L4 4L4 10L14 12L4 14L4 20Z" fill="currentColor"/></svg>
-              Enviar
-            </button>
+          <div class="console-layout">
+            <div class="console-main">
+              <div class="console-log" id="consoleLog"></div>
+              <div class="console-input-row">
+                <input id="consoleInput" type="text" placeholder="Escribe un comando y pulsa Enter…" disabled />
+                <button id="consoleSend" type="button" class="btn btn-accent" disabled>
+                  <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M4 20L20 12L4 4L4 10L14 12L4 14L4 20Z" fill="currentColor"/></svg>
+                  Enviar
+                </button>
+              </div>
+            </div>
+            <aside class="console-players">
+              <h3>Jugadores conectados</h3>
+              <div id="playersList" class="players-list"><p class="hint">Servidor detenido.</p></div>
+
+              <div class="player-lists-tabs">
+                <button type="button" class="mini-tab active" data-list="whitelist">Whitelist</button>
+                <button type="button" class="mini-tab" data-list="ops">Operadores</button>
+                <button type="button" class="mini-tab" data-list="bans">Baneados</button>
+              </div>
+              <div id="playerListPanel" class="player-list-panel"></div>
+            </aside>
           </div>
         </section>
       </div>
@@ -103,6 +118,6 @@
     </main>
   </div>
 
-  <script src="renderer.js?v=20260917-1"></script>
+  <script src="renderer.js?v=20260923-1"></script>
 </body>
 </html>

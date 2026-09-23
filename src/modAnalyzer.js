@@ -154,7 +154,31 @@ function applyModsToServer(serverModsDir, analysisResults, { includeUnknown = tr
   return { destination: serverModsDir, copiedNew, copiedOverwritten, skipped, failed };
 }
 
-module.exports = { analyzeMods, applyModsToServer, sha1File, selectModsForServer };
+/**
+ * Añade a cada resultado del análisis un campo serverState comparándolo con lo
+ * que YA hay en la carpeta mods/ del servidor, por hash (no solo por nombre):
+ * 'new' (no existe ahí), 'same' (existe y es idéntico), 'different' (existe
+ * con ese nombre pero el contenido no coincide: probablemente una actualización).
+ * Así, en re-análisis sucesivos, solo hace falta fijarse en 'new'/'different'.
+ */
+async function diffAgainstServer(analysisResults, serverModsDir) {
+  return Promise.all(
+    analysisResults.map(async (r) => {
+      const destPath = path.join(serverModsDir, r.fileName);
+      if (!fs.existsSync(destPath)) {
+        return { ...r, serverState: 'new' };
+      }
+      try {
+        const existingHash = await sha1File(destPath);
+        return { ...r, serverState: existingHash === r.sha1 ? 'same' : 'different' };
+      } catch (e) {
+        return { ...r, serverState: 'new' };
+      }
+    })
+  );
+}
+
+module.exports = { analyzeMods, applyModsToServer, sha1File, selectModsForServer, diffAgainstServer };
 
 /**
  * Filtra los resultados del análisis dejando solo los que deben ir al servidor.

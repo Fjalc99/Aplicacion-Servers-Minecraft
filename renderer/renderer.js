@@ -1,3 +1,4 @@
+
 const state = {
   servers: [],
   selectedId: null,
@@ -110,6 +111,38 @@ function labelForLoader(loader) {
   return { vanilla: 'Vanilla', forge: 'Forge', neoforge: 'NeoForge' }[loader] || loader;
 }
 
+function formatSeconds(s) {
+  if (s < 1) return '<1s';
+  if (s < 60) return `${Math.round(s)}s`;
+  const m = Math.floor(s / 60);
+  const rem = Math.round(s % 60);
+  return `${m}m ${rem}s`;
+}
+
+/**
+ * Pinta (o actualiza) una barra de progreso dentro de container a partir de un
+ * evento { doneBytes, totalBytes, doneCount, totalCount } y calcula un tiempo
+ * restante aproximado según lo que se lleva tardado hasta ahora.
+ */
+function renderProgressBar(container, info, startTime) {
+  const fraction = info.totalBytes > 0
+    ? info.doneBytes / info.totalBytes
+    : (info.totalCount > 0 ? info.doneCount / info.totalCount : 0);
+  const pct = Math.min(100, Math.round(fraction * 100));
+  const elapsed = (Date.now() - startTime) / 1000;
+  let etaText = '';
+  if (fraction > 0.05 && fraction < 1) {
+    const remaining = Math.max(0, elapsed / fraction - elapsed);
+    etaText = ` · ~${formatSeconds(remaining)} restantes`;
+  }
+  container.innerHTML = `
+    <div class="progress-bar-wrap">
+      <div class="progress-bar-track"><div class="progress-bar-fill" style="width:${pct}%"></div></div>
+      <span class="progress-bar-label">${pct}% (${info.doneCount}/${info.totalCount})${etaText}</span>
+    </div>
+  `;
+}
+
 function escapeHtml(str) {
   return String(str).replace(/[&<>"']/g, (c) => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
@@ -203,7 +236,37 @@ function renderOverview(server) {
       <button id="importWorldBtn" class="btn btn-accent">Importar mundo desde carpeta</button>
       <div id="importWorldMsg" class="hint" style="margin-top:8px;"></div>
     </div>
+    <div class="card">
+      <h3>Copias de seguridad</h3>
+      <p class="hint" style="margin-top:0;">Comprime la carpeta del mundo tal cual está ahora. Se guardan en <code>backups/</code> dentro de la carpeta del servidor (se conservan las 10 más recientes).</p>
+      <button id="backupNowBtn" class="btn btn-accent">Backup ahora</button>
+      <div id="backupNowMsg" class="hint" style="margin-top:8px;"></div>
+      <div id="backupsList" style="margin-top:14px;"><p class="hint">Cargando…</p></div>
+    </div>
   `;
+
+  refreshBackupsList(server);
+
+  document.getElementById('backupNowBtn').addEventListener('click', async () => {
+    const btn = document.getElementById('backupNowBtn');
+    const msg = document.getElementById('backupNowMsg');
+    btn.disabled = true;
+    msg.innerHTML = '<div class="progress-bar-wrap"><div class="progress-bar-track"><div class="progress-bar-fill" style="width:0%"></div></div><span class="progress-bar-label">Preparando…</span></div>';
+
+    const startTime = Date.now();
+    window.api.onBackupProgress(server.id, (info) => renderProgressBar(msg, info, startTime));
+
+    const result = await window.api.createBackup(server.id);
+    window.api.removeBackupProgressListeners(server.id);
+    btn.disabled = false;
+    if (!result.ok) {
+      msg.innerHTML = `<span class="error-text">Error: ${escapeHtml(result.error)}</span>`;
+      return;
+    }
+    const mb = (result.size / 1024 / 1024).toFixed(1);
+    msg.textContent = `Backup creado (${mb} MB).`;
+    refreshBackupsList(server);
+  });
 
   document.getElementById('importWorldBtn').addEventListener('click', async () => {
     const folder = await window.api.pickWorldFolder();
@@ -228,6 +291,74 @@ function renderOverview(server) {
     msg.textContent = result.ok
       ? `Mundo importado en "${result.levelName}".`
       : `Error: ${result.error}`;
+  });
+}
+
+async function refreshBackupsList(server) {
+  const el = document.getElementById('backupsList');
+  if (!el) return;
+
+  let backups;
+  try {
+    backups = await window.api.listBackups(server.id);
+  } catch (error) {
+    el.innerHTML = `<span class="error-text">Error al listar backups: ${escapeHtml(error.message)}</span>`;
+    return;
+  }
+
+  if (backups.length === 0) {
+    el.innerHTML = '<p class="hint">Todavía no hay ninguna copia de seguridad.</p>';
+    return;
+  }
+
+  el.innerHTML = `
+    <table class="mods-table">
+      <thead><tr><th>Fecha</th><th>Tamaño</th><th></th></tr></thead>
+      <tbody>
+        ${backups
+          .map(
+            (b) => `
+          <tr>
+            <td>${new Date(b.createdAt).toLocaleString()}</td>
+            <td>${(b.size / 1024 / 1024).toFixed(1)} MB</td>
+            <td style="display:flex; gap:6px;">
+              <button class="btn btn-ghost" data-action="restore" data-file="${escapeHtml(b.fileName)}">Restaurar</button>
+              <button class="btn btn-ghost" data-action="delete" data-file="${escapeHtml(b.fileName)}">Eliminar</button>
+            </td>
+          </tr>`
+          )
+          .join('')}
+      </tbody>
+    </table>
+  `;
+
+  el.querySelectorAll('button[data-action="restore"]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const running = await window.api.isRunning(server.id);
+      if (running) {
+        alert('Detén el servidor antes de restaurar un backup.');
+        return;
+      }
+      const ok = confirm(
+        'Esto sustituirá el mundo actual por el del backup. El mundo actual no se borra, se renombra por seguridad. ¿Continuar?'
+      );
+      if (!ok) return;
+      const result = await window.api.restoreBackup(server.id, btn.dataset.file);
+      if (!result.ok) {
+        alert('Error: ' + result.error);
+        return;
+      }
+      alert('Backup restaurado correctamente.');
+    });
+  });
+
+  el.querySelectorAll('button[data-action="delete"]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const ok = confirm('¿Eliminar este backup? No se puede deshacer.');
+      if (!ok) return;
+      await window.api.deleteBackup(server.id, btn.dataset.file);
+      refreshBackupsList(server);
+    });
   });
 }
 
@@ -261,6 +392,25 @@ async function renderConfig(server) {
       <p class="hint">Ajusta el recolector de basura de Java (G1GC) con una configuración muy usada en servidores de Minecraft para evitar tirones. No cambia el gameplay, solo cómo Java gestiona la memoria. Se aplica la próxima vez que inicies el servidor.</p>
       <button id="cfgApplyPreset" class="btn btn-ghost" style="margin-top:10px;">Aplicar ajustes de rendimiento recomendados</button>
       <p class="hint">Reduce distancia de visión/simulación y otros parámetros de <code>server.properties</code> a valores que suelen aliviar bastante la carga en servidores modded, sin tocar dificultad ni modo de juego.</p>
+    </div>
+    <div class="card">
+      <h3>Fiabilidad</h3>
+      <div class="field field-inline">
+        <input type="checkbox" id="cfgAutoRestart" ${server.autoRestart ? 'checked' : ''} />
+        <label for="cfgAutoRestart">Reiniciar automáticamente si el servidor se cae solo</label>
+      </div>
+      <p class="hint">Si el proceso termina sin que tú hayas pulsado "Detener" (un crash), se reinicia solo a los 5 segundos.</p>
+
+      <div class="field field-inline" style="margin-top:14px;">
+        <input type="checkbox" id="cfgAutoBackupStop" ${server.autoBackup && server.autoBackup.onStop ? 'checked' : ''} />
+        <label for="cfgAutoBackupStop">Hacer backup automático cada vez que se detiene el servidor</label>
+      </div>
+      <div class="field" style="margin-top:10px; max-width:260px;">
+        <label>Backup automático cada X horas mientras está en marcha (0 = desactivado)</label>
+        <input type="number" id="cfgAutoBackupHours" min="0" step="1" value="${(server.autoBackup && server.autoBackup.everyHours) || 0}" />
+      </div>
+      <button id="cfgSaveReliability" class="btn btn-ghost" style="margin-top:12px;">Guardar</button>
+      <span id="cfgReliabilitySaved" class="hint" style="margin-left:10px;"></span>
     </div>
     <div class="card">
       <h3>server.properties</h3>
@@ -328,6 +478,26 @@ async function renderConfig(server) {
     }
   });
 
+  document.getElementById('cfgAutoRestart').addEventListener('change', async (e) => {
+    try {
+      await window.api.updateAutoRestart(server.id, e.target.checked);
+    } catch (error) {
+      showNotice(`No se pudo guardar la preferencia de reinicio automático: ${error.message}`);
+    }
+  });
+
+  document.getElementById('cfgSaveReliability').addEventListener('click', async () => {
+    try {
+      const onStop = document.getElementById('cfgAutoBackupStop').checked;
+      const everyHours = Number(document.getElementById('cfgAutoBackupHours').value) || 0;
+      await window.api.updateAutoBackup(server.id, onStop, everyHours);
+      document.getElementById('cfgReliabilitySaved').textContent = 'Guardado.';
+      setTimeout(() => (document.getElementById('cfgReliabilitySaved').textContent = ''), 2000);
+    } catch (error) {
+      showNotice(`No se pudieron guardar los ajustes de backup automático: ${error.message}`);
+    }
+  });
+
   document.getElementById('cfgApplyPreset').addEventListener('click', async () => {
     try {
       await window.api.applyPerformancePreset(server.id);
@@ -390,7 +560,7 @@ function renderMods(server) {
     if (!folder) return;
     document.getElementById('modsFolderLabel').textContent = folder;
     document.getElementById('modsResult').innerHTML = '<p class="hint">Analizando mods contra Modrinth…</p>';
-    const res = await window.api.analyzeMods(folder);
+    const res = await window.api.analyzeMods(folder, server.id);
     if (!res.ok) {
       document.getElementById('modsResult').innerHTML = `<p class="error-text">${escapeHtml(res.error)}</p>`;
       return;
@@ -413,13 +583,26 @@ function renderModsTable(server) {
     return '<span class="badge badge-unknown">No identificado</span>';
   };
 
-  const row = (m, i, checkClass) => `
+  const serverStateBadge = (serverState) => {
+    if (serverState === 'new') return '<span class="badge badge-unknown">Nuevo</span>';
+    if (serverState === 'different') return '<span class="badge badge-needed">Actualización</span>';
+    if (serverState === 'same') return '<span class="badge">Ya está igual</span>';
+    return '';
+  };
+
+  const row = (m, i, checkClass) => {
+    // Si ya sabemos que en el servidor está exactamente igual, no hace falta
+    // volver a copiarlo: se desmarca por defecto (el usuario puede marcarlo si quiere).
+    const defaultChecked = m.serverState !== 'same';
+    return `
       <tr>
-        <td><input type="checkbox" class="${checkClass}" data-i="${i}" checked /></td>
+        <td><input type="checkbox" class="${checkClass}" data-i="${i}" ${defaultChecked ? 'checked' : ''} /></td>
         <td>${escapeHtml(m.name)}</td>
         <td>${badge(m.status)}</td>
+        <td>${serverStateBadge(m.serverState)}</td>
         <td>${m.modrinthUrl ? `<a href="${m.modrinthUrl}" target="_blank">Modrinth</a>` : '—'}</td>
       </tr>`;
+  };
 
   const serverRows = lastModAnalysis
     .map((m, i) => ({ m, i }))
@@ -437,7 +620,7 @@ function renderModsTable(server) {
     <h3 style="margin-top:0;">Mods para el servidor (${serverRows ? serverRows.split('<tr>').length - 1 : 0})</h3>
     ${serverRows ? `
     <table class="mods-table">
-      <thead><tr><th>Copiar</th><th>Mod</th><th>Estado</th><th></th></tr></thead>
+      <thead><tr><th>Copiar</th><th>Mod</th><th>Estado</th><th>En el servidor</th><th></th></tr></thead>
       <tbody>${serverRows}</tbody>
     </table>
     <div style="display:flex; gap:10px; flex-wrap:wrap; margin-top:14px;">
@@ -450,7 +633,7 @@ function renderModsTable(server) {
     ${clientRows ? `
     <p class="hint" style="margin-top:0;">Estos mods no van al servidor (son de interfaz/gráficos/etc. y el servidor los rechazaría o los ignoraría). Aquí los tienes aparte por si quieres, por ejemplo, generar el pack de cliente para tus amigos.</p>
     <table class="mods-table">
-      <thead><tr><th>Incluir</th><th>Mod</th><th>Estado</th><th></th></tr></thead>
+      <thead><tr><th>Incluir</th><th>Mod</th><th>Estado</th><th>En el servidor</th><th></th></tr></thead>
       <tbody>${clientRows}</tbody>
     </table>
     <div style="display:flex; gap:10px; flex-wrap:wrap; margin-top:14px;">
@@ -508,8 +691,12 @@ function renderModsTable(server) {
         return;
       }
 
-      resultEl.textContent = `Empaquetando ${checked.length} mods…`;
+      resultEl.textContent = 'Elige dónde guardar el ZIP…';
+      const startTime = Date.now();
+      window.api.onModsExportProgress((info) => renderProgressBar(resultEl, info, startTime));
+
       const result = await window.api.exportModsZip(server.id, checked);
+      window.api.removeModsExportProgressListeners();
 
       if (result.canceled) {
         resultEl.textContent = '';
@@ -531,6 +718,7 @@ function renderModsTable(server) {
         window.api.showInFolder(result.zipPath);
       });
     } catch (error) {
+      window.api.removeModsExportProgressListeners();
       resultEl.innerHTML = `<span class="error-text">Error: ${escapeHtml(error.message)}</span>`;
       showNotice(`No se pudo generar el ZIP: ${error.message}`);
     }
@@ -552,15 +740,153 @@ function renderModsTable(server) {
 // ---------------------------------------------------------------------------
 
 function bindConsole(server) {
-  if (state.consoleBoundId === server.id) return;
+  if (state.consoleBoundId === server.id) {
+    refreshPlayers(server.id);
+    refreshPlayerListPanel(server);
+    return;
+  }
   if (state.consoleBoundId) window.api.removeLogListeners(state.consoleBoundId);
   state.consoleBoundId = server.id;
   document.getElementById('consoleLog').textContent = '';
 
   window.api.onLog(server.id, (line) => appendConsole(line));
-  window.api.onExit(server.id, () => {
-    appendConsole('\n[Proceso finalizado]\n');
+  window.api.onExit(server.id, ({ code, crashed, diagnosis }) => {
+    if (crashed) {
+      appendConsole(`\n[El servidor se cayó inesperadamente (código ${code})]\n[Diagnóstico automático: ${diagnosis}]\n`);
+      showNotice(`"${server.name}" se ha caído: ${diagnosis}`);
+    } else {
+      appendConsole('\n[Proceso finalizado]\n');
+    }
     refreshStatus(server);
+    renderPlayers([]);
+  });
+  window.api.onPlayersChange(server.id, (players) => renderPlayers(players));
+
+  refreshPlayers(server.id);
+  bindPlayerListTabs(server);
+}
+
+// ---------------------------------------------------------------------------
+// Whitelist / operadores / baneados
+// ---------------------------------------------------------------------------
+
+const PLAYER_LIST_LABELS = {
+  whitelist: { empty: 'La whitelist está vacía.', kind: 'whitelist' },
+  ops: { empty: 'No hay operadores.', kind: 'ops' },
+  bans: { empty: 'No hay nadie baneado.', kind: 'bans' },
+};
+
+let currentPlayerListKind = 'whitelist';
+
+function bindPlayerListTabs(server) {
+  document.querySelectorAll('.mini-tab').forEach((btn) => {
+    btn.onclick = () => {
+      document.querySelectorAll('.mini-tab').forEach((b) => b.classList.toggle('active', b === btn));
+      currentPlayerListKind = btn.dataset.list;
+      refreshPlayerListPanel(server);
+    };
+  });
+  refreshPlayerListPanel(server);
+}
+
+async function refreshPlayerListPanel(server) {
+  const panel = document.getElementById('playerListPanel');
+  if (!panel) return;
+  const kind = currentPlayerListKind;
+  panel.innerHTML = '<p class="hint">Cargando…</p>';
+
+  try {
+    const list = await window.api.readPlayerList(server.id, kind);
+    if (!list || list.length === 0) {
+      panel.innerHTML = `<p class="hint">${PLAYER_LIST_LABELS[kind].empty}</p>`;
+      return;
+    }
+    panel.innerHTML = list
+      .map((entry) => {
+        const name = entry.name || '(sin nombre)';
+        const extra = kind === 'ops' ? ` · nivel ${entry.level ?? '?'}` : kind === 'bans' && entry.reason ? ` · ${escapeHtml(entry.reason)}` : '';
+        return `
+          <div class="plist-row">
+            <span>${escapeHtml(name)}${extra}</span>
+            <button type="button" class="btn btn-ghost" data-remove="${escapeHtml(name)}">Quitar</button>
+          </div>`;
+      })
+      .join('');
+
+    panel.querySelectorAll('[data-remove]').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        btn.disabled = true;
+        try {
+          const result = await window.api.removeFromPlayerList(server.id, kind, btn.dataset.remove);
+          if (!result.ok) {
+            showNotice(`No se pudo quitar: ${result.error}`);
+            btn.disabled = false;
+            return;
+          }
+          refreshPlayerListPanel(server);
+        } catch (error) {
+          showNotice(error.message);
+          btn.disabled = false;
+        }
+      });
+    });
+  } catch (error) {
+    panel.innerHTML = `<p class="error-text">Error: ${escapeHtml(error.message)}</p>`;
+  }
+}
+
+async function refreshPlayers(serverId) {
+  try {
+    const running = await window.api.isRunning(serverId);
+    if (!running) {
+      renderPlayers(null);
+      return;
+    }
+    const players = await window.api.getPlayers(serverId);
+    renderPlayers(players);
+  } catch (error) {
+    renderPlayers(null);
+  }
+}
+
+function renderPlayers(players) {
+  const el = document.getElementById('playersList');
+  if (!el) return;
+
+  if (players === null) {
+    el.innerHTML = '<p class="hint">Servidor detenido.</p>';
+    return;
+  }
+  if (players.length === 0) {
+    el.innerHTML = '<p class="hint">Nadie conectado ahora mismo.</p>';
+    return;
+  }
+
+  el.innerHTML = players
+    .map(
+      (name) => `
+      <div class="player-row">
+        <div class="player-name">${escapeHtml(name)}</div>
+        <div class="player-actions">
+          <button class="btn btn-ghost" data-action="op" data-player="${escapeHtml(name)}">OP</button>
+          <button class="btn btn-ghost" data-action="kick" data-player="${escapeHtml(name)}">Kick</button>
+          <button class="btn btn-danger" data-action="ban" data-player="${escapeHtml(name)}">Ban</button>
+        </div>
+      </div>`
+    )
+    .join('');
+
+  el.querySelectorAll('button[data-action]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const { action, player } = btn.dataset;
+      const commands = { op: `op ${player}`, kick: `kick ${player}`, ban: `ban ${player}` };
+      appendConsole(`\n> ${commands[action]}\n`);
+      try {
+        await window.api.sendCommand(state.selectedId, commands[action]);
+      } catch (error) {
+        showNotice(error.message);
+      }
+    });
   });
 }
 
@@ -600,6 +926,7 @@ async function onStart() {
     await window.api.startServer(state.selectedId);
     const server = await window.api.getServer(state.selectedId);
     await refreshStatus(server);
+    renderPlayers([]);
   } catch (error) {
     showNotice(`No se pudo iniciar el servidor: ${error.message}`);
   }
