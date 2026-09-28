@@ -27,7 +27,7 @@ jobs:
       - name: Comprobar sintaxis
         shell: bash
         run: |
-          for f in main.js preload.js src/*.js renderer/renderer.js test/*.js; do
+          for f in main.js preload.js src/*.js renderer/renderer.js test/*.js web/*.js web/public/*.js; do
             node --check "$f"
           done
 

@@ -25,6 +25,7 @@ par de clics.
 - [Clonar un servidor como plantilla](#clonar-un-servidor-como-plantilla)
 - [Actualizaciones automáticas](#actualizaciones-automáticas)
 - [Tests e integración continua](#tests-e-integración-continua)
+- [Versión web (experimental, solo local)](#versión-web-experimental-solo-local)
 - [Estructura del proyecto](#estructura-del-proyecto)
 - [Subir el proyecto a GitHub](#subir-el-proyecto-a-github)
 - [Pendiente](#pendiente)
@@ -260,7 +261,7 @@ Notas:
 ## Estructura del proyecto
 
 ```
-main.js                 Proceso principal de Electron + handlers IPC
+main.js                 Proceso principal de Electron (ventana, bandeja, diálogos, actualizador)
 preload.js               Puente seguro entre main y la interfaz
 src/
   mojangApi.js             Versiones y URLs de descarga (Vanilla/Forge/NeoForge)
@@ -275,12 +276,16 @@ src/
   backupManager.js            Crear, listar, restaurar y borrar backups del mundo
   crashDiagnostics.js          Traduce el log de una caída a un mensaje en español
   playerFiles.js               Lectura/edición de whitelist.json, ops.json, banned-players.json
+  appCore.js                   Lógica compartida por escritorio y web (lanzar, backups, handlers)
   store.js / paths.js          Persistencia de la lista de servidores
 renderer/
   index.html / style.css / renderer.js   Interfaz de usuario
 build/
   icon.png / tray-icon.png     Iconos de la app y de la bandeja
   icon-512.png                 Icono para macOS (exige 512×512 como mínimo)
+web/
+  server.js                    Servidor web (HTTP + WebSocket) que reutiliza src/ y renderer/
+  public/electron-shim.js      Electron simulado para ejecutar preload.js en el navegador
 test/                          Tests con node:test (npm test)
 .github/workflows/
   test.yml                     Tests en cada push / pull request
@@ -462,6 +467,66 @@ mods, flags de JVM, diagnóstico de caídas, whitelist/ops/baneados, backups
 
 El workflow `test.yml` los ejecuta en Ubuntu y Windows en cada push y pull request,
 además de comprobar la sintaxis de todos los ficheros JavaScript.
+
+## Versión web (experimental, solo local)
+
+Además de la app de escritorio, el proyecto se puede usar desde el navegador:
+
+```bash
+npm install
+npm run web
+```
+
+y abrir `http://127.0.0.1:3000`. Es la **misma interfaz y el mismo motor** que la
+app de escritorio: no hay una segunda copia del código que mantener.
+
+### Cómo está hecha
+
+- `src/appCore.js` contiene toda la lógica que antes estaba en `main.js` y no
+  depende de Electron (lanzar servidores, backups automáticos, reinicio
+  automático, mods, jugadores...). La usan tanto `main.js` (vía IPC) como
+  `web/server.js` (vía HTTP).
+- `web/server.js` sirve la carpeta `renderer/` tal cual, recibe las llamadas en
+  `POST /api/invoke` y envía los eventos en vivo (consola, jugadores, progreso,
+  caídas, notificaciones) por WebSocket en `/ws`.
+- En el navegador se ejecuta **el propio `preload.js`** sobre un Electron
+  simulado (`web/public/electron-shim.js`). Si añades un método nuevo a
+  `preload.js` y su handler a `src/appCore.js`, aparece a la vez en escritorio
+  y en la web.
+
+### Diferencias con la app de escritorio
+
+| Escritorio | Web |
+|---|---|
+| Elegir carpeta con el explorador | Se escribe la ruta (del equipo donde corre `npm run web`) |
+| "Guardar ZIP de mods" con diálogo | El ZIP se descarga en el navegador (copia en `<DATA_DIR>/exports/`) |
+| Notificaciones del sistema | Notificaciones del navegador (se piden al primer clic) |
+| Bandeja del sistema, actualizaciones automáticas | No aplican |
+
+"Abrir carpeta" funciona, pero abre la carpeta en el equipo que ejecuta el servidor
+web, así que solo tiene sentido si lo usas en ese mismo equipo.
+
+### Datos y configuración
+
+- Por defecto usa la misma carpeta de datos que `npm start` en escritorio, así que
+  ve los mismos servidores. Con la variable `DATA_DIR` puedes usar otra (por
+  ejemplo, la de la app instalada si su carpeta tiene otro nombre).
+- `PORT` cambia el puerto (por defecto `3000`) y `HOST` la interfaz de red (por
+  defecto `127.0.0.1`, solo este equipo).
+- **No abras a la vez la app de escritorio y la web sobre los mismos datos.** Cada
+  una solo sabe qué servidores ha arrancado ella, así que podrías lanzar dos veces
+  el mismo servidor.
+- Al cerrar con Ctrl+C, si hay servidores en marcha se les manda `stop` y se espera
+  a que guarden el mundo antes de salir (Ctrl+C otra vez para forzar).
+
+### ⚠ Seguridad: todavía NO es para internet
+
+Esta versión **no tiene login**: cualquiera que llegue a la página puede arrancar
+procesos, borrar servidores o restaurar backups. Por eso solo escucha en
+`127.0.0.1`. No cambies `HOST` a `0.0.0.0`, no abras el puerto en el router y no la
+publiques con DuckDNS hasta tener, como mínimo, usuarios con contraseña, permisos
+por rol, HTTPS (por ejemplo con Caddy) y validación de las rutas de archivos que
+llegan del navegador.
 
 ## Pendiente
 
