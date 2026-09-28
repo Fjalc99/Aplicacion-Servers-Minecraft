@@ -1,16 +1,9 @@
 const { app, BrowserWindow, ipcMain, shell, dialog, session, Tray, Menu, nativeImage, Notification } = require('electron');
 const path = require('path');
-const fs = require('fs');
 
 const store = require('./src/store');
-const serverManager = require('./src/serverManager');
-const mojang = require('./src/mojangApi');
 const javaProcess = require('./src/javaProcess');
-const modAnalyzer = require('./src/modAnalyzer');
-const zipWriter = require('./src/zipWriter');
-const backupManager = require('./src/backupManager');
-const crashDiagnostics = require('./src/crashDiagnostics');
-const playerFiles = require('./src/playerFiles');
+const { createAppCore } = require('./src/appCore');
 
 // electron-updater solo tiene sentido en la app empaquetada (en desarrollo no
 // hay app-update.yml). Se carga con try para que un fallo aquí nunca impida
@@ -25,93 +18,20 @@ try {
 let mainWindow;
 let tray = null;
 
-// serverId -> intervalId, para las copias de seguridad automáticas "cada X horas"
-const autoBackupIntervals = new Map();
-
 function notify(title, body) {
   if (!Notification.isSupported()) return;
   new Notification({ title, body, icon: path.join(__dirname, 'build', 'icon.png') }).show();
 }
 
-function stopAutoBackupInterval(serverId) {
-  const interval = autoBackupIntervals.get(serverId);
-  if (interval) {
-    clearInterval(interval);
-    autoBackupIntervals.delete(serverId);
-  }
-}
-
-function startAutoBackupIntervalIfNeeded(server) {
-  stopAutoBackupInterval(server.id);
-  const hours = server.autoBackup && server.autoBackup.everyHours;
-  if (!hours || hours <= 0) return;
-
-  const interval = setInterval(async () => {
-    try {
-      await backupManager.createBackup(server);
-      mainWindow.webContents.send(`servers:log:${server.id}`, '\n[Backup automático realizado]\n');
-    } catch (err) {
-      mainWindow.webContents.send(`servers:log:${server.id}`, `\n[Backup automático fallido: ${err.message}]\n`);
-    }
-  }, hours * 60 * 60 * 1000);
-
-  autoBackupIntervals.set(server.id, interval);
-}
-
-/**
- * Arranca un servidor cableando logs, jugadores, notificación de "listo",
- * diagnóstico de caídas, backup automático al parar y reinicio automático si
- * se cae solo. Se usa tanto desde el IPC de "Iniciar" como desde el propio
- * reinicio automático (que no viene de un clic del usuario).
- */
-function launchServer(server) {
-  javaProcess.startServer(server, {
-    onLog: (line) => {
-      mainWindow.webContents.send(`servers:log:${server.id}`, line);
-    },
-    onReady: () => {
-      notify('Servidor iniciado', `"${server.name}" ya está listo para jugar.`);
-    },
-    onPlayersChange: (players) => {
-      mainWindow.webContents.send(`servers:players:${server.id}`, players);
-    },
-    onExit: async ({ code, crashed, recentLogText }) => {
-      stopAutoBackupInterval(server.id);
-
-      const diagnosis = crashed ? crashDiagnostics.diagnose(recentLogText) : null;
-      mainWindow.webContents.send(`servers:exit:${server.id}`, { code, crashed, diagnosis });
-
-      if (!crashed) {
-        // Parada intencionada: si está configurado, backup justo después de que
-        // el proceso haya terminado de guardar el mundo por sí mismo.
-        const current = store.getServer(server.id);
-        if (current && current.autoBackup && current.autoBackup.onStop) {
-          try {
-            await backupManager.createBackup(current);
-            mainWindow.webContents.send(`servers:log:${server.id}`, '\n[Backup automático tras detener el servidor]\n');
-          } catch (err) {
-            mainWindow.webContents.send(`servers:log:${server.id}`, `\n[No se pudo hacer el backup automático: ${err.message}]\n`);
-          }
-        }
-        return;
-      }
-
-      notify('El servidor se ha caído', `"${server.name}": ${diagnosis}`);
-
-      const current = store.getServer(server.id);
-      if (current && current.autoRestart) {
-        mainWindow.webContents.send(`servers:log:${server.id}`, '\n[El servidor se cayó solo; reiniciando automáticamente en 5s...]\n');
-        setTimeout(() => {
-          const stillExists = store.getServer(server.id);
-          if (stillExists && !javaProcess.isRunning(server.id)) {
-            launchServer(stillExists);
-            startAutoBackupIntervalIfNeeded(stillExists);
-          }
-        }, 5000);
-      }
-    },
-  });
-}
+// Toda la lógica que no depende de Electron (lanzar servidores, backups,
+// reinicio automático, mods, jugadores...) vive en src/appCore.js y la
+// comparte la versión web (web/server.js). Aquí solo se conecta con la ventana.
+const core = createAppCore({
+  send: (channel, payload) => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(channel, payload);
+  },
+  notify,
+});
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -276,242 +196,35 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });
 
-// ---------- IPC: servidores ----------
 
-ipcMain.handle('servers:list', () => store.listServers());
-ipcMain.handle('servers:get', (e, id) => store.getServer(id));
-ipcMain.handle('servers:checkJava', () => serverManager.checkJava());
+// ---------- IPC: handlers compartidos (src/appCore.js) ----------
 
-ipcMain.handle('servers:create', async (event, options) => {
-  try {
-    const server = await serverManager.createServer(options, (progress) => {
-      event.sender.send('servers:createProgress', progress);
-    });
-    return { ok: true, server };
-  } catch (err) {
-    return { ok: false, error: err.message };
-  }
-});
+for (const [channel, handler] of Object.entries(core.handlers)) {
+  ipcMain.handle(channel, (event, arg) =>
+    handler(arg, { reply: (replyChannel, payload) => event.sender.send(replyChannel, payload) })
+  );
+}
 
-ipcMain.handle('servers:delete', (e, { id, deleteFiles }) => {
-  serverManager.deleteServer(id, { deleteFiles });
-  return true;
-});
+// ---------- IPC: solo escritorio (diálogos nativos y explorador de archivos) ----------
 
-ipcMain.handle('servers:updateProperties', (e, { id, properties }) =>
-  serverManager.updateProperties(id, properties)
-);
+async function pickFolder(title) {
+  const result = await dialog.showOpenDialog(mainWindow, { title, properties: ['openDirectory'] });
+  if (result.canceled || result.filePaths.length === 0) return null;
+  return result.filePaths[0];
+}
 
-ipcMain.handle('servers:updateMemory', (e, { id, memory }) =>
-  serverManager.updateMemory(id, memory)
-);
-
-ipcMain.handle('servers:updateOptimizeJvm', (e, { id, enabled }) =>
-  serverManager.updateOptimizeJvm(id, enabled)
-);
-
-ipcMain.handle('servers:applyPerformancePreset', (e, id) =>
-  serverManager.applyPerformancePreset(id)
-);
-
-ipcMain.handle('servers:systemMemory', () => ({
-  totalMb: Math.round(require('os').totalmem() / 1024 / 1024),
-}));
+ipcMain.handle('servers:pickImportFolder', () => pickFolder('Selecciona la carpeta del servidor existente'));
+ipcMain.handle('worlds:pickFolder', () => pickFolder('Selecciona la carpeta del mundo'));
+ipcMain.handle('mods:pickFolder', () => pickFolder('Selecciona la carpeta de mods del cliente'));
 
 ipcMain.handle('servers:openFolder', (e, id) => {
   const server = store.getServer(id);
   if (server) shell.openPath(server.dir);
 });
 
-// ---------- IPC: importar servidor / mundo existentes ----------
-
-ipcMain.handle('servers:pickImportFolder', async () => {
-  const result = await dialog.showOpenDialog(mainWindow, {
-    title: 'Selecciona la carpeta del servidor existente',
-    properties: ['openDirectory'],
-  });
-  if (result.canceled || result.filePaths.length === 0) return null;
-  return result.filePaths[0];
-});
-
-ipcMain.handle('worlds:pickFolder', async () => {
-  const result = await dialog.showOpenDialog(mainWindow, {
-    title: 'Selecciona la carpeta del mundo',
-    properties: ['openDirectory'],
-  });
-  if (result.canceled || result.filePaths.length === 0) return null;
-  return result.filePaths[0];
-});
-
-ipcMain.handle('servers:detectExisting', (e, folderPath) => {
-  try {
-    return { ok: true, result: serverManager.detectExistingServer(folderPath) };
-  } catch (err) {
-    return { ok: false, error: err.message };
-  }
-});
-
-ipcMain.handle('servers:import', (e, options) => {
-  try {
-    const server = serverManager.importServer(options);
-    return { ok: true, server };
-  } catch (err) {
-    return { ok: false, error: err.message };
-  }
-});
-
-ipcMain.handle('servers:importWorld', (e, { serverId, worldFolder }) => {
-  try {
-    const result = serverManager.importWorld(serverId, worldFolder);
-    return { ok: true, ...result };
-  } catch (err) {
-    return { ok: false, error: err.message };
-  }
-});
-
-// ---------- IPC: proceso del servidor ----------
-
-ipcMain.handle('servers:start', (event, id) => {
-  const server = store.getServer(id);
-  if (!server) throw new Error('Servidor no encontrado');
-  launchServer(server);
-  startAutoBackupIntervalIfNeeded(server);
+ipcMain.handle('mods:showInFolder', (e, filePath) => {
+  shell.showItemInFolder(filePath);
   return true;
-});
-
-ipcMain.handle('servers:stop', (e, { id, force }) => {
-  javaProcess.stopServer(id, { force });
-  return true;
-});
-
-ipcMain.handle('servers:sendCommand', (e, { id, command }) => {
-  javaProcess.sendCommand(id, command);
-  return true;
-});
-
-ipcMain.handle('servers:isRunning', (e, id) => javaProcess.isRunning(id));
-ipcMain.handle('servers:getPlayers', (e, id) => javaProcess.getPlayers(id));
-ipcMain.handle('servers:resourceUsage', (e, id) => javaProcess.getResourceUsage(id));
-
-ipcMain.handle('servers:updateAutoRestart', (e, { id, enabled }) =>
-  serverManager.updateAutoRestart(id, enabled)
-);
-
-ipcMain.handle('servers:updateAutoBackup', (e, { id, onStop, everyHours }) => {
-  const server = serverManager.updateAutoBackup(id, { onStop, everyHours });
-  if (javaProcess.isRunning(id)) startAutoBackupIntervalIfNeeded(server);
-  return server;
-});
-
-// ---------- IPC: backups ----------
-
-ipcMain.handle('servers:listBackups', (e, id) => {
-  const server = store.getServer(id);
-  if (!server) throw new Error('Servidor no encontrado');
-  return backupManager.listBackups(server);
-});
-
-ipcMain.handle('servers:createBackup', async (event, id) => {
-  try {
-    const server = store.getServer(id);
-    if (!server) throw new Error('Servidor no encontrado');
-    const result = await backupManager.createBackup(server, {
-      onProgress: (info) => event.sender.send(`servers:backupProgress:${id}`, info),
-    });
-    return { ok: true, ...result };
-  } catch (err) {
-    return { ok: false, error: err.message };
-  }
-});
-
-ipcMain.handle('servers:restoreBackup', (e, { id, fileName }) => {
-  try {
-    const server = store.getServer(id);
-    if (!server) throw new Error('Servidor no encontrado');
-    if (javaProcess.isRunning(id)) throw new Error('Detén el servidor antes de restaurar un backup.');
-    const result = backupManager.restoreBackup(server, fileName);
-    return { ok: true, ...result };
-  } catch (err) {
-    return { ok: false, error: err.message };
-  }
-});
-
-ipcMain.handle('servers:deleteBackup', (e, { id, fileName }) => {
-  try {
-    const server = store.getServer(id);
-    if (!server) throw new Error('Servidor no encontrado');
-    backupManager.deleteBackup(server, fileName);
-    return { ok: true };
-  } catch (err) {
-    return { ok: false, error: err.message };
-  }
-});
-
-// ---------- IPC: whitelist / ops / baneados ----------
-
-ipcMain.handle('servers:readPlayerList', (e, { id, kind }) => {
-  const server = store.getServer(id);
-  if (!server) throw new Error('Servidor no encontrado');
-  return playerFiles.readList(server.dir, kind);
-});
-
-ipcMain.handle('servers:removeFromPlayerList', (e, { id, kind, name }) => {
-  try {
-    const server = store.getServer(id);
-    if (!server) throw new Error('Servidor no encontrado');
-
-    if (javaProcess.isRunning(id)) {
-      javaProcess.sendCommand(id, playerFiles.REMOVE_COMMANDS[kind](name));
-      return { ok: true, live: true };
-    }
-    const list = playerFiles.removeByNameFromFile(server.dir, kind, name);
-    return { ok: true, live: false, list };
-  } catch (err) {
-    return { ok: false, error: err.message };
-  }
-});
-
-// ---------- IPC: catálogo de versiones ----------
-
-ipcMain.handle('catalog:vanillaVersions', () => mojang.listVanillaVersions());
-ipcMain.handle('catalog:forgeVersions', (e, mcVersion) => mojang.listForgeVersions(mcVersion));
-ipcMain.handle('catalog:forgeRecommended', (e, mcVersion) => mojang.getForgeRecommended(mcVersion));
-ipcMain.handle('catalog:neoforgeVersions', (e, mcVersion) => mojang.listNeoForgeVersions(mcVersion));
-
-// ---------- IPC: mods ----------
-
-ipcMain.handle('mods:pickFolder', async () => {
-  const result = await dialog.showOpenDialog(mainWindow, { properties: ['openDirectory'] });
-  if (result.canceled || result.filePaths.length === 0) return null;
-  return result.filePaths[0];
-});
-
-ipcMain.handle('mods:analyze', async (e, { folder, serverId }) => {
-  try {
-    let results = await modAnalyzer.analyzeMods(folder);
-    if (serverId) {
-      const server = store.getServer(serverId);
-      if (server) {
-        const modsDir = path.join(server.dir, 'mods');
-        results = await modAnalyzer.diffAgainstServer(results, modsDir);
-      }
-    }
-    return { ok: true, results };
-  } catch (err) {
-    return { ok: false, error: err.message };
-  }
-});
-
-ipcMain.handle('mods:apply', (e, { serverId, results, includeUnknown }) => {
-  try {
-    const server = store.getServer(serverId);
-    if (!server) throw new Error('Servidor no encontrado');
-    const modsDir = path.join(server.dir, 'mods');
-    const result = modAnalyzer.applyModsToServer(modsDir, results, { includeUnknown });
-    return { ok: true, ...result };
-  } catch (err) {
-    return { ok: false, error: err.message };
-  }
 });
 
 ipcMain.handle('mods:exportZip', async (e, { serverId, results }) => {
@@ -528,26 +241,10 @@ ipcMain.handle('mods:exportZip', async (e, { serverId, results }) => {
     });
     if (save.canceled || !save.filePath) return { ok: false, canceled: true };
 
-    const entries = results
-      .filter((r) => fs.existsSync(r.file))
-      .map((r) => ({ name: r.fileName, filePath: r.file }));
-
-    if (entries.length === 0) {
-      return { ok: false, error: 'No hay ficheros válidos que empaquetar.' };
-    }
-
-    await zipWriter.createZip(entries, save.filePath, (info) => {
+    return await core.buildModsZip(results, save.filePath, (info) => {
       e.sender.send('mods:exportProgress', info);
     });
-    const size = fs.statSync(save.filePath).size;
-
-    return { ok: true, zipPath: save.filePath, count: entries.length, size };
   } catch (err) {
     return { ok: false, error: err.message };
   }
-});
-
-ipcMain.handle('mods:showInFolder', (e, filePath) => {
-  shell.showItemInFolder(filePath);
-  return true;
 });
