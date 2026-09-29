@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self';" />
+  <title>Configuración inicial · Minecraft Server Manager</title>
+  <link rel="stylesheet" href="/web/login.css" />
+</head>
+<body>
+  <main class="login-card">
+    <div class="login-brand">
+      <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 2L21 7V17L12 22L3 17V7L12 2Z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M12 2V12M12 12L21 7M12 12L3 7M12 12V22" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg>
+      <span>Server Manager</span>
+    </div>
+    <h1>Crea el administrador</h1>
+    <p class="login-hint left">Es la cuenta con control total. El código está en la ventana donde ejecutaste <code>npm run web</code>.</p>
+    <form id="setupForm" novalidate>
+      <label for="code">Código de configuración</label>
+      <input id="code" name="code" autocomplete="off" required autofocus />
+      <label for="username">Tu usuario</label>
+      <input id="username" name="username" autocomplete="username" required />
+      <label for="password">Contraseña (mínimo 8 caracteres)</label>
+      <input id="password" name="password" type="password" autocomplete="new-password" required />
+      <label for="password2">Repite la contraseña</label>
+      <input id="password2" name="password2" type="password" autocomplete="new-password" required />
+      <p id="setupError" class="login-error" role="alert" hidden></p>
+      <button type="submit" id="setupSubmit">Crear y entrar</button>
+    </form>
+  </main>
+  <script src="/web/setup.js"></script>
+</body>
+</html>

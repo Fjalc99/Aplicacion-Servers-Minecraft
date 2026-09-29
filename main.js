@@ -4,6 +4,7 @@ const path = require('path');
 const store = require('./src/store');
 const javaProcess = require('./src/javaProcess');
 const { createAppCore } = require('./src/appCore');
+const duckdns = require('./src/duckdns');
 
 // electron-updater solo tiene sentido en la app empaquetada (en desarrollo no
 // hay app-update.yml). Se carga con try para que un fallo aquí nunca impida
@@ -178,6 +179,7 @@ app.whenReady().then(async () => {
   await session.defaultSession.clearCache();
   createWindow();
   createTray();
+  duckdns.startUpdater();
   setupAutoUpdater();
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

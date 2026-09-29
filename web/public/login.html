@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self';" />
+  <title>Entrar · Minecraft Server Manager</title>
+  <link rel="stylesheet" href="/web/login.css" />
+</head>
+<body>
+  <main class="login-card">
+    <div class="login-brand">
+      <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 2L21 7V17L12 22L3 17V7L12 2Z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M12 2V12M12 12L21 7M12 12L3 7M12 12V22" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg>
+      <span>Server Manager</span>
+    </div>
+
+    <h1 id="formTitle">Iniciar sesión</h1>
+    <form id="loginForm" novalidate>
+      <label for="username">Usuario</label>
+      <input id="username" name="username" autocomplete="username" required autofocus />
+      <label for="password">Contraseña</label>
+      <input id="password" name="password" type="password" autocomplete="current-password" required />
+      <div id="repeatWrap" hidden>
+        <label for="password2">Repite la contraseña</label>
+        <input id="password2" name="password2" type="password" autocomplete="new-password" />
+        <p class="login-hint left">Usuario: 3–32 letras, números, "_", "-" o ".". Contraseña: al menos 8 caracteres.</p>
+      </div>
+      <p id="loginError" class="login-error" role="alert" hidden></p>
+      <p id="loginOk" class="login-ok" role="status" hidden></p>
+      <button type="submit" id="loginSubmit">Entrar</button>
+    </form>
+
+    <p class="login-hint">
+      <span id="switchText">¿No tienes cuenta?</span>
+      <button type="button" id="switchMode" class="login-link">Crear una</button>
+    </p>
+  </main>
+  <script src="/web/login.js"></script>
+</body>
+</html>

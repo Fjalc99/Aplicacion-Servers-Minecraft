@@ -102,6 +102,8 @@ function startServer(server, callbacks = {}) {
     recentLog: [],
     players: new Set(),
     ready: false,
+    startedAt: Date.now(),
+    readyAt: null,
     // Con 'jar' el PID de spawn() ya es el de Java; con 'script' es el de
     // cmd.exe/bash y hay que buscar el java hijo (ver getResourceUsage).
     viaScript: server.launch.type === 'script',
@@ -113,7 +115,10 @@ function startServer(server, callbacks = {}) {
   const emit = (text) => {
     if (onLog) onLog(text);
     const { playersChanged, becameReady } = pushLogLines(entry, text);
-    if (becameReady && onReady) onReady();
+    if (becameReady) {
+      entry.readyAt = Date.now();
+      if (onReady) onReady();
+    }
     if (playersChanged && onPlayersChange) onPlayersChange([...entry.players]);
   };
 
@@ -236,4 +241,19 @@ async function getResourceUsage(serverId) {
   };
 }
 
-module.exports = { startServer, stopServer, sendCommand, isRunning, getPlayers, getResourceUsage };
+/**
+ * Estado del servidor tal y como lo verá un jugador:
+ *   offline  -> apagado
+ *   starting -> el proceso ya corre pero todavía no ha escrito "Done (...)"
+ *   online   -> listo para entrar
+ *   stopping -> se le ha pedido parar y está guardando el mundo
+ */
+function getStatus(serverId) {
+  const entry = running.get(serverId);
+  if (!entry) return { state: 'offline', players: [], startedAt: null, readyAt: null };
+  let state = entry.ready ? 'online' : 'starting';
+  if (entry.intentionalStop) state = 'stopping';
+  return { state, players: [...entry.players], startedAt: entry.startedAt, readyAt: entry.readyAt };
+}
+
+module.exports = { startServer, stopServer, sendCommand, isRunning, getPlayers, getResourceUsage, getStatus };

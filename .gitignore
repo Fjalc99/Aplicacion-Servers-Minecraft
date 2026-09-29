@@ -17,3 +17,10 @@ Thumbs.db
 
 # Variables de entorno si algún día se añaden
 .env
+
+# Usuarios de la versión web (por si DATA_DIR apunta dentro del repo)
+web-users.json
+exports/
+
+# Ajustes de la app: contiene el token de DuckDNS (por si DATA_DIR apunta dentro del repo)
+settings.json
