@@ -49,11 +49,25 @@
       }
     };
 
-    socket.onclose = () => {
+    socket.onclose = async () => {
+      // Si se ha cerrado porque la sesión ya no vale, al login.
+      try {
+        const me = await fetch('/api/me');
+        if (me.status === 401) {
+          goToLogin();
+          return;
+        }
+      } catch (e) {
+        // Servidor caído: se sigue reintentando.
+      }
       setConnectionBanner(true);
       setTimeout(connect, reconnectDelay);
       reconnectDelay = Math.min(reconnectDelay * 2, 15000);
     };
+  }
+
+  function goToLogin() {
+    window.location.href = '/login';
   }
 
   function setConnectionBanner(visible) {
@@ -133,11 +147,21 @@
         data = null;
       }
 
+      if (response.status === 401) {
+        goToLogin();
+        throw new Error((data && data.error) || 'Sesión caducada');
+      }
       if (!response.ok) {
         throw new Error((data && data.error) || `Error ${response.status}`);
       }
 
       const result = data ? data.result : null;
+
+      // Qué tipo de acceso tiene este usuario al servidor seleccionado (propio o
+      // compartido): roles.css lo usa para mostrar u ocultar controles.
+      if (channel === 'servers:get' && result && result.access) {
+        document.body.dataset.serverAccess = result.access;
+      }
 
       // En escritorio el ZIP se guarda con "Guardar como"; aquí se descarga.
       if (channel === 'mods:exportZip' && result && result.ok && result.downloadUrl) {

@@ -25,7 +25,10 @@ par de clics.
 - [Clonar un servidor como plantilla](#clonar-un-servidor-como-plantilla)
 - [Actualizaciones automáticas](#actualizaciones-automáticas)
 - [Tests e integración continua](#tests-e-integración-continua)
-- [Versión web (experimental, solo local)](#versión-web-experimental-solo-local)
+- [playit.gg: jugar desde fuera sin abrir puertos](#playitgg-jugar-desde-fuera-sin-abrir-puertos-recomendado)
+- [DuckDNS integrado (alternativa)](#duckdns-integrado-alternativa)
+- [Página de inicio (estilo Aternos)](#página-de-inicio-estilo-aternos)
+- [Versión web con acceso para amigos](#versión-web-con-acceso-para-amigos)
 - [Estructura del proyecto](#estructura-del-proyecto)
 - [Subir el proyecto a GitHub](#subir-el-proyecto-a-github)
 - [Pendiente](#pendiente)
@@ -182,12 +185,10 @@ Aquí sí hay que abrir el puerto hacia el exterior:
    router (normalmente `192.168.1.1` o `192.168.0.1` en el navegador) y busca
    "Port Forwarding" / "Reenvío de puertos". Reenvía el puerto **25565 TCP** (o el
    que hayas puesto en `server-port`) hacia la IP local de tu PC.
-2. Averigua tu **IP pública** (buscando "cuál es mi ip" en Google) y dásela a tus
-   amigos junto con el puerto, si no es el 25565: `TU_IP_PUBLICA:PUERTO`.
-3. Si tu IP pública cambia a menudo, usa un servicio de **DNS dinámico** (No-IP,
-   DuckDNS) para tener un nombre fijo tipo `tuservidor.duckdns.org` en vez de una
-   IP que cambia.
-4. **Si tu operador usa CGNAT** (habitual en fibra compartida o datos móviles) no
+2. Para no tener que dar tu IP a nadie, configura **DuckDNS** desde la propia app
+   (ver [DuckDNS integrado](#duckdns-integrado-alternativa)): tus amigos usarán un nombre tipo
+   `tuservidor.duckdns.org`, que además se actualiza solo si tu IP cambia.
+3. **Si tu operador usa CGNAT** (habitual en fibra compartida o datos móviles) no
    podrás abrir puertos de esta forma, porque tu router ni siquiera tiene una IP
    pública propia. En ese caso, la alternativa es un servicio de túnel como
    **playit.gg** o **ngrok**, que te da una dirección pública sin tocar el router.
@@ -277,6 +278,9 @@ src/
   crashDiagnostics.js          Traduce el log de una caída a un mensaje en español
   playerFiles.js               Lectura/edición de whitelist.json, ops.json, banned-players.json
   appCore.js                   Lógica compartida por escritorio y web (lanzar, backups, handlers)
+  settings.js                  Ajustes generales (dirección pública) en settings.json
+  playit.js                    Dirección de playit por servidor y detección del programa de playit
+  duckdns.js                   Actualización automática de DuckDNS (el token nunca sale de aquí)
   store.js / paths.js          Persistencia de la lista de servidores
 renderer/
   index.html / style.css / renderer.js   Interfaz de usuario
@@ -285,7 +289,15 @@ build/
   icon-512.png                 Icono para macOS (exige 512×512 como mínimo)
 web/
   server.js                    Servidor web (HTTP + WebSocket) que reutiliza src/ y renderer/
+  auth.js                      Usuarios, contraseñas, sesiones y permisos por rol
+  access.js                    Dueños de servidores, visibilidad, permisos por servidor y límites
+  usuarios.js                  Herramienta de terminal (opcional): npm run usuarios
+  public/setup.*               Página para crear el primer administrador con el código de la terminal
+  publicTunnel.js              Enlace público de la web con un quick tunnel de Cloudflare
+test-fixtures/
+  fake-cloudflared.js          cloudflared simulado para los tests (fuera de test/ a propósito)
   public/electron-shim.js      Electron simulado para ejecutar preload.js en el navegador
+  public/login.*, roles.css    Página de login y ocultación de controles para amigos
 test/                          Tests con node:test (npm test)
 .github/workflows/
   test.yml                     Tests en cada push / pull request
@@ -468,65 +480,301 @@ mods, flags de JVM, diagnóstico de caídas, whitelist/ops/baneados, backups
 El workflow `test.yml` los ejecuta en Ubuntu y Windows en cada push y pull request,
 además de comprobar la sintaxis de todos los ficheros JavaScript.
 
-## Versión web (experimental, solo local)
+## playit.gg: jugar desde fuera sin abrir puertos (recomendado)
 
-Además de la app de escritorio, el proyecto se puede usar desde el navegador:
+Con playit.gg tus amigos se conectan a una dirección de playit (tipo
+`algo.joinmc.link`) y playit reenvía la conexión a tu PC: **no hay que tocar el
+router, funciona aunque tu compañía use CGNAT, y tu IP no se ve**.
+
+1. Descarga e instala el programa desde playit.gg/download y ábrelo.
+2. La primera vez te da un enlace de *claim*: ábrelo, crea tu cuenta (gratis) y
+   vincula tu PC.
+3. En el panel de playit: *Add tunnel* → tipo **Minecraft Java** → destino
+   `127.0.0.1:<puerto del servidor>`. En **Ajustes** de la app tienes una tabla con
+   el destino exacto de cada servidor.
+4. Copia la dirección que te da playit y pégala en su fila de esa tabla. Es la que
+   verán tus amigos en la página de **Inicio** de ese servidor.
+
+En Ajustes la app también te dice si el programa de playit está en marcha en tu PC.
+Tiene que seguir abierto mientras se juega: si se cierra, el túnel se corta.
+
+**Límites del plan gratis** (tabla de precios de playit.gg a finales de septiembre
+de 2026): 4 puertos y 2 agentes. Con los túneles de tipo Minecraft Java eso son
+**como mucho 4 servidores con dirección de playit** (por ejemplo, el tuyo y tres de
+tus amigos). La dirección gratuita es aleatoria pero no cambia. El plan Premium
+cuesta unos 3 $ al mes y amplía a 16 puertos.
+
+### ¿Y la web? Enlace público con Cloudflare (gratis, IP oculta)
+
+playit.gg gratis solo sirve para los **servidores de Minecraft**. Para que tus amigos
+entren a la **web** (registrarse, encender mundos) sin que se vea tu IP, la app usa
+un *quick tunnel* de **Cloudflare**: gratis, sin cuenta, con HTTPS y sin abrir puertos.
+
+1. Instala el programa de Cloudflare. En Windows, en una terminal:
+   ```powershell
+   winget install --id Cloudflare.cloudflared
+   ```
+   Luego cierra y vuelve a abrir `npm run web`, para que lo encuentre. Si lo tienes
+   en otra carpeta, indícala con la variable `MSM_CLOUDFLARED`.
+2. En **Ajustes → Enlace de la web para tus amigos**, pulsa **Activar enlace
+   público**. En unos segundos aparece una dirección
+   `https://palabras-al-azar.trycloudflare.com` con un botón para copiarla.
+3. Pásasela a tus amigos. Entran, se crean la cuenta y, cuando la apruebes, ya
+   pueden encender los mundos. Para jugar usan la dirección de playit que ven en
+   Inicio.
+
+Marca "Activarlo solo cada vez que arranque la web" para no tener que pulsarlo cada
+vez. Si el túnel se cae o cambia, te llega un aviso.
+
+Lo que hay que saber:
+- **El enlace cambia cada vez que se reinicia el túnel** (al reiniciar la web o el
+  PC): hay que volver a pasarlo. Para un enlace fijo haría falta un dominio propio
+  con un túnel con nombre de Cloudflare, o playit Premium.
+- Cloudflare presenta los quick tunnels como algo para pruebas, no para
+  producción, con un máximo de 200 peticiones simultáneas. Para un grupo de amigos
+  sobra, pero no hay garantía de disponibilidad.
+- El enlace es público. Cualquiera que lo tenga ve la pantalla de entrar, pero nadie
+  puede usar la web sin una cuenta aprobada por ti. Tampoco pueden crearse el
+  primer administrador sin el código de tu terminal.
+- La web sigue escuchando solo en `127.0.0.1`: el túnel sale desde tu PC, así que
+  no hay que abrir nada en el router.
+
+Si prefieres otra opción: **playit Premium** (unos 3 $ al mes, túnel HTTPS con
+dirección fija) o **Caddy + DuckDNS abriendo el 443** (gratis, pero con ese método tu
+IP sí se puede averiguar; ver más abajo).
+
+## DuckDNS integrado (alternativa)
+
+Si prefieres abrir puertos en el router en vez de usar playit, en **Ajustes →
+Alternativa** puedes configurar DuckDNS para que tus amigos se conecten con un
+nombre en vez de tu IP:
+
+1. Entra en [duckdns.org](https://www.duckdns.org) e inicia sesión.
+2. Crea un subdominio (por ejemplo `miserver`) con *add domain*.
+3. Copia el *token* que aparece arriba de la página.
+4. En la app: Ajustes → escribe el subdominio y el token → **Guardar y comprobar**.
+
+La app hace una actualización real para comprobar que los datos son correctos y
+solo entonces los guarda. A partir de ahí:
+- Actualiza la IP cada 5 minutos mientras la app (escritorio o `npm run web`)
+  esté abierta, así que no hace falta el Programador de tareas ni tocar el router.
+- Pone `miserver.duckdns.org` como dirección pública, y es la que aparece en la
+  página de Inicio de cada servidor para tus amigos.
+- El token se guarda en `settings.json` dentro de la carpeta de datos y **nunca se
+  envía a la interfaz**: ni tus amigos ni nadie que abra la web puede verlo.
+
+Si tu router tiene DuckDNS en su apartado "DDNS", también puedes configurarlo ahí;
+no pasa nada por tener los dos.
+
+**DuckDNS no oculta tu IP.** Le pone un nombre, pero cualquiera puede consultar a
+qué IP apunta (`nslookup miserver.duckdns.org`). Si no quieres que se vea, hace falta
+un túnel como playit.gg, que reenvía el tráfico por sus servidores. DuckDNS tampoco
+abre puertos: sigue siendo necesario reenviarlos en el router.
+
+## Página de inicio (estilo Aternos)
+
+Al elegir un servidor se abre la pestaña **Inicio**, pensada para jugar y no para
+administrar:
+
+- El **estado** en grande: Apagado, Iniciando…, En línea o Deteniendo… "En línea"
+  solo aparece cuando el servidor ha terminado de cargar de verdad (cuando escribe
+  `Done` en la consola), así tus amigos saben cuándo pueden entrar.
+- Un **botón grande** para iniciar o detener.
+- La **dirección para conectarse**, con botón de copiar y el puerto si no es el 25565.
+- Jugadores conectados sobre el máximo, software y versión.
+- Las últimas líneas de la consola, con un enlace a la consola completa.
+
+Funciona igual en la app de escritorio y en la web.
+
+### La dirección que ven tus amigos
+
+Se elige en este orden:
+1. La **dirección pública**: la pone sola DuckDNS, o puedes escribirla tú en
+   Ajustes (por ejemplo si tienes un dominio propio). Se guarda en `settings.json`
+   dentro de la carpeta de datos, o se puede dar con la variable
+   `MSM_DIRECCION_PUBLICA`.
+2. En la web, si se ha entrado por un dominio (por ejemplo a través de Caddy), ese
+   mismo dominio.
+3. Si no, la IP de tu red local, avisando de que solo sirve para quien esté en tu
+   misma WiFi.
+
+## Versión web con acceso para amigos
+
+Además de la app de escritorio, el proyecto se puede usar desde el navegador, con
+usuarios y permisos, para que tus amigos puedan encender el servidor sin ti.
+
+### Primer arranque
 
 ```bash
 npm install
 npm run web
 ```
 
-y abrir `http://127.0.0.1:3000`. Es la **misma interfaz y el mismo motor** que la
-app de escritorio: no hay una segunda copia del código que mantener.
+La primera vez, la terminal muestra un **código de configuración** de 8 caracteres.
+Abre `http://127.0.0.1:3000`: te llevará a "Crea el administrador", donde pones ese
+código, tu usuario y tu contraseña. El código solo aparece en la terminal de tu PC,
+así que nadie más puede quedarse con la cuenta de administrador aunque la web ya
+estuviera accesible desde fuera.
+
+### Cuentas: registro desde la web
+
+- Cualquiera puede pulsar **"Crear una"** en la pantalla de inicio de sesión. La
+  cuenta queda **pendiente** y no puede entrar hasta que la apruebes.
+- Te llega un aviso, y en **Ajustes → Usuarios** tienes las pendientes con
+  *Aprobar* / *Rechazar*.
+- En esa misma tarjeta puedes cambiar el rol (amigo o administrador), dar permiso de
+  comandos en tus servidores, generar una **contraseña temporal** a quien la olvide
+  (se muestra una sola vez) y borrar cuentas.
+- Cada usuario puede cambiar su contraseña desde "Cambiar contraseña", abajo a la
+  derecha.
+- Contra el spam: como mucho 3 registros por hora desde la misma conexión y 20
+  cuentas pendientes a la vez.
+
+La herramienta de terminal sigue existiendo por si la necesitas
+(`npm run usuarios -- listar`, `crear`, `borrar`, `password`, `comandos`), pero ya
+no hace falta para nada.
+
+Hay dos tipos de servidor:
+
+- **Compartidos**: los que crea o importa un administrador, y los que ya existían
+  desde la app de escritorio. Todos los amigos los ven y pueden encenderlos sin que
+  tú tengas que hacer nada.
+- **Propios de un amigo**: los que crea él. Solo los ven él y los administradores
+  (en la lista aparecen como "tuyo" o "de pepe").
+
+| Puede… | Admin | Amigo en uno compartido | Amigo en uno suyo |
+|---|:-:|:-:|:-:|
+| Ver, consola, jugadores y gráficas | ✓ | ✓ | ✓ |
+| Encender y apagar | ✓ | ✓ | ✓ |
+| Hacer backups | ✓ | ✓ | ✓ |
+| Escribir comandos, OP/Kick/Ban | ✓ | solo con `--comandos` | ✓ |
+| Forzar la parada | ✓ | ✗ | ✓ |
+| Restaurar o borrar backups | ✓ | ✗ | ✓ |
+| Configuración y RAM | ✓ | ✗ | ✓ (con límites) |
+| Borrar el servidor | ✓ | ✗ | ✓ |
+| Crear servidores (Vanilla/Forge/NeoForge) | ✓ | ✓ (serán suyos) | — |
+| Importar servidores o mundos, mods desde carpeta, abrir carpetas | ✓ | ✗ | ✗ |
+| Ver servidores de otros amigos | ✓ | ✗ | ✗ |
+
+Lo último es siempre solo para administradores porque trabaja con rutas del disco
+del PC: un amigo podría leer tus archivos o meter mods, que son código que se
+ejecuta en tu equipo.
+
+### Límites para los servidores de amigos
+
+Para que entre todos no dejen el PC sin memoria:
+
+| Límite | Por defecto | Variable para cambiarlo |
+|---|---|---|
+| Servidores por amigo | 2 | `MSM_AMIGO_MAX_SERVIDORES` |
+| Encendidos a la vez por amigo | 1 | `MSM_AMIGO_MAX_ENCENDIDOS` |
+| RAM máxima por servidor | 4096 MB | `MSM_AMIGO_MAX_RAM_MB` |
+| Puertos para sus servidores | 25566–25599 | `MSM_AMIGO_PUERTO_MIN` / `MSM_AMIGO_PUERTO_MAX` |
+
+Además, ningún amigo puede encender un servidor (suyo o compartido) si la RAM
+asignada a todos los encendidos pasaría del 85 % de la del PC.
+
+A cada servidor nuevo de un amigo se le asigna automáticamente un puerto libre de
+ese rango. Para que se pueda jugar en él desde fuera:
+- **Con playit.gg:** crea un túnel Minecraft Java hacia ese puerto y pega su
+  dirección en la tabla de Ajustes (recuerda: 4 túneles en el plan gratis).
+- **Abriendo puertos:** reenvía en el router el rango 25566–25599 TCP a tu PC.
+  Tus amigos juegan en `tuservidor.duckdns.org:<puerto>`.
+
+Ejemplo en PowerShell para permitir 3 servidores por amigo:
+
+```powershell
+$env:MSM_AMIGO_MAX_SERVIDORES="3"; npm run web
+```
+
+Los permisos se comprueban **en el servidor** (`web/access.js` y `web/auth.js`). A los amigos también
+se les ocultan los botones que no pueden usar, pero eso es solo para que la
+interfaz sea clara.
+
+Detalles de seguridad incluidos:
+- Las contraseñas se guardan cifradas con scrypt en `<DATA_DIR>/web-users.json`,
+  nunca en claro.
+- Las sesiones duran 7 días en una cookie `HttpOnly` y `SameSite=Lax`. Al
+  reiniciar `npm run web` hay que volver a entrar.
+- Tras 5 intentos de login fallidos desde la misma IP, se bloquea 15 minutos.
+- Se rechazan peticiones y conexiones WebSocket que vengan de otra web (CSRF).
+- Cambiar la contraseña de alguien o borrarlo le cierra la sesión al momento.
 
 ### Cómo está hecha
 
-- `src/appCore.js` contiene toda la lógica que antes estaba en `main.js` y no
-  depende de Electron (lanzar servidores, backups automáticos, reinicio
-  automático, mods, jugadores...). La usan tanto `main.js` (vía IPC) como
-  `web/server.js` (vía HTTP).
+- `src/appCore.js` contiene la lógica que comparten escritorio y web (lanzar
+  servidores, backups automáticos, reinicio automático, mods, jugadores...).
 - `web/server.js` sirve la carpeta `renderer/` tal cual, recibe las llamadas en
-  `POST /api/invoke` y envía los eventos en vivo (consola, jugadores, progreso,
-  caídas, notificaciones) por WebSocket en `/ws`.
+  `POST /api/invoke` y envía los eventos en vivo por WebSocket en `/ws`.
 - En el navegador se ejecuta **el propio `preload.js`** sobre un Electron
-  simulado (`web/public/electron-shim.js`). Si añades un método nuevo a
-  `preload.js` y su handler a `src/appCore.js`, aparece a la vez en escritorio
-  y en la web.
+  simulado (`web/public/electron-shim.js`). Si añades una función nueva a
+  `preload.js` y a `src/appCore.js`, aparece a la vez en escritorio y en la web.
+  Si debe estar disponible para amigos, añade también su canal a
+  `FRIEND_CHANNELS` en `web/auth.js` (servidores compartidos) y/o a
+  `OWNER_CHANNELS` en `web/access.js` (sus propios servidores).
 
 ### Diferencias con la app de escritorio
 
 | Escritorio | Web |
 |---|---|
 | Elegir carpeta con el explorador | Se escribe la ruta (del equipo donde corre `npm run web`) |
-| "Guardar ZIP de mods" con diálogo | El ZIP se descarga en el navegador (copia en `<DATA_DIR>/exports/`) |
+| "Guardar ZIP de mods" con diálogo | El ZIP se descarga en el navegador |
 | Notificaciones del sistema | Notificaciones del navegador (se piden al primer clic) |
 | Bandeja del sistema, actualizaciones automáticas | No aplican |
 
-"Abrir carpeta" funciona, pero abre la carpeta en el equipo que ejecuta el servidor
-web, así que solo tiene sentido si lo usas en ese mismo equipo.
-
-### Datos y configuración
-
-- Por defecto usa la misma carpeta de datos que `npm start` en escritorio, así que
-  ve los mismos servidores. Con la variable `DATA_DIR` puedes usar otra (por
-  ejemplo, la de la app instalada si su carpeta tiene otro nombre).
-- `PORT` cambia el puerto (por defecto `3000`) y `HOST` la interfaz de red (por
-  defecto `127.0.0.1`, solo este equipo).
-- **No abras a la vez la app de escritorio y la web sobre los mismos datos.** Cada
-  una solo sabe qué servidores ha arrancado ella, así que podrías lanzar dos veces
-  el mismo servidor.
+- Usa la misma carpeta de datos que la app de escritorio, así que ve los mismos
+  servidores. Con `DATA_DIR` puedes elegir otra; `PORT` cambia el puerto (3000 por
+  defecto).
+- **No uses a la vez la app de escritorio y la web con un servidor en marcha.** Cada
+  una solo sabe qué servidores ha arrancado ella, y podrías lanzar el mismo dos veces.
 - Al cerrar con Ctrl+C, si hay servidores en marcha se les manda `stop` y se espera
-  a que guarden el mundo antes de salir (Ctrl+C otra vez para forzar).
+  a que guarden el mundo antes de salir.
 
-### ⚠ Seguridad: todavía NO es para internet
+### Acceso desde internet con HTTPS (Caddy + DuckDNS)
 
-Esta versión **no tiene login**: cualquiera que llegue a la página puede arrancar
-procesos, borrar servidores o restaurar backups. Por eso solo escucha en
-`127.0.0.1`. No cambies `HOST` a `0.0.0.0`, no abras el puerto en el router y no la
-publiques con DuckDNS hasta tener, como mínimo, usuarios con contraseña, permisos
-por rol, HTTPS (por ejemplo con Caddy) y validación de las rutas de archivos que
-llegan del navegador.
+Nunca expongas `npm run web` directamente: sin HTTPS las contraseñas viajarían
+sin cifrar. Déjalo escuchando en `127.0.0.1` (lo que hace por defecto) y pon
+delante **Caddy**, que consigue y renueva el certificado HTTPS él solo.
+
+1. Ten DuckDNS configurado en Ajustes (ver [DuckDNS integrado](#duckdns-integrado-alternativa)).
+2. En el router, reenvía a tu PC los puertos **80 y 443 TCP** (Caddy necesita el 80
+   para obtener el certificado). No abras el 3000.
+3. Descarga Caddy de caddyserver.com y crea un archivo `Caddyfile`:
+
+   ```
+   tuservidor.duckdns.org {
+       reverse_proxy 127.0.0.1:3000
+   }
+   ```
+
+4. Con `npm run web` en marcha, ejecuta `caddy run` en la carpeta del `Caddyfile`.
+5. Tus amigos entran en `https://tuservidor.duckdns.org` y juegan en
+   `tuservidor.duckdns.org:25565`, como antes.
+
+Si tu operador usa CGNAT no podrás abrir puertos. En ese caso hace falta un túnel
+(por ejemplo Cloudflare Tunnel) en vez de reenviar puertos.
+
+### Que funcione aunque tú no estés
+
+Tus amigos no necesitan que hagas nada para encender servidores, pero **tu PC tiene
+que estar encendido** y con `npm run web` (y Caddy) funcionando. Para no depender de
+tener una terminal abierta ni la sesión iniciada, instálalos como servicios de
+Windows con [NSSM](https://nssm.cc), así arrancan solos con el PC:
+
+```powershell
+nssm install MinecraftWeb "C:\Program Files\nodejs\node.exe" "C:\ruta\al\proyecto\web\server.js"
+nssm set MinecraftWeb AppDirectory "C:\ruta\al\proyecto"
+nssm set MinecraftWeb AppEnvironmentExtra DATA_DIR=C:\Users\Usuario\AppData\Roaming\minecraft-server-manager
+nssm start MinecraftWeb
+```
+
+(Con `DATA_DIR` apuntando a la misma carpeta que usa la app, porque el servicio
+no corre con tu usuario y si no buscaría los datos en otro sitio.) Haz lo mismo
+con `caddy.exe run` para Caddy. Y en las opciones de energía de Windows, evita que
+el PC se suspenda.
+
+Si quieres que funcione **con tu PC apagado**, la única forma es mover todo a una
+máquina que esté siempre encendida (un VPS o un miniPC en casa).
 
 ## Pendiente
 

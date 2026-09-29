@@ -21,6 +21,10 @@
         Nuevo servidor
       </button>
       <div class="server-list" id="serverList"></div>
+      <button id="settingsBtn" type="button" class="btn btn-ghost btn-block">
+        <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="1.6"/><path d="M12 2.5v2.2M12 19.3v2.2M4.2 4.2l1.6 1.6M18.2 18.2l1.6 1.6M2.5 12h2.2M19.3 12h2.2M4.2 19.8l1.6-1.6M18.2 5.8l1.6-1.6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+        Ajustes
+      </button>
       <div class="java-status" id="javaStatus"><span class="dot"></span><span id="javaStatusText">Comprobando Java…</span></div>
     </aside>
 
@@ -66,12 +70,14 @@
         </header>
 
         <nav class="tabs">
+          <button type="button" class="tab" data-tab="home">Inicio</button>
           <button type="button" class="tab" data-tab="overview">Resumen</button>
           <button type="button" class="tab" data-tab="config">Configuración</button>
           <button type="button" class="tab" data-tab="mods">Mods</button>
-          <button type="button" class="tab active" data-tab="console">Consola</button>
+          <button type="button" class="tab" data-tab="console">Consola</button>
         </nav>
 
+        <section id="tab-home" class="tab-panel" hidden></section>
         <section id="tab-overview" class="tab-panel" hidden></section>
         <section id="tab-config" class="tab-panel" hidden></section>
         <section id="tab-mods" class="tab-panel" hidden></section>
@@ -101,6 +107,8 @@
           </div>
         </section>
       </div>
+
+      <section id="settingsView" class="settings-view" hidden aria-label="Ajustes"></section>
 
       <section id="wizardOverlay" class="wizard-screen" hidden aria-label="Crear o importar servidor">
         <div class="wizard">

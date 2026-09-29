@@ -11,6 +11,19 @@ const zipWriter = require('./zipWriter');
 const backupManager = require('./backupManager');
 const crashDiagnostics = require('./crashDiagnostics');
 const playerFiles = require('./playerFiles');
+const settings = require('./settings');
+const duckdns = require('./duckdns');
+const playit = require('./playit');
+
+/** Primera IPv4 de la red local (la que usan los que están en tu misma WiFi). */
+function lanIpv4() {
+  for (const list of Object.values(os.networkInterfaces())) {
+    for (const net of list || []) {
+      if (net.family === 'IPv4' && !net.internal) return net.address;
+    }
+  }
+  return null;
+}
 
 /**
  * Lógica compartida por la app de escritorio (main.js, vía IPC de Electron) y
@@ -18,7 +31,8 @@ const playerFiles = require('./playerFiles');
  *
  * deps:
  *   send(channel, payload)  -> envía un evento a la interfaz (log, jugadores, caídas...)
- *   notify(title, body)     -> muestra una notificación al usuario
+ *   notify(title, body, serverId) -> muestra una notificación (serverId permite
+ *                                    a la web enviarla solo a quien ve ese servidor)
  *
  * Devuelve { handlers, launchServer, buildModsZip }. Cada handler recibe
  * (arg, ctx), donde arg es el mismo único argumento que manda la interfaz y
@@ -65,7 +79,7 @@ function createAppCore({ send, notify }) {
         send(`servers:log:${server.id}`, line);
       },
       onReady: () => {
-        notify('Servidor iniciado', `"${server.name}" ya está listo para jugar.`);
+        notify('Servidor iniciado', `"${server.name}" ya está listo para jugar.`, server.id);
       },
       onPlayersChange: (players) => {
         send(`servers:players:${server.id}`, players);
@@ -91,7 +105,7 @@ function createAppCore({ send, notify }) {
           return;
         }
 
-        notify('El servidor se ha caído', `"${server.name}": ${diagnosis}`);
+        notify('El servidor se ha caído', `"${server.name}": ${diagnosis}`, server.id);
 
         const current = store.getServer(server.id);
         if (current && current.autoRestart) {
@@ -209,6 +223,37 @@ function createAppCore({ send, notify }) {
     },
 
     'servers:isRunning': (id) => javaProcess.isRunning(id),
+
+    // Estado "para jugadores" (página de inicio del servidor)
+    'servers:status': (id) => {
+      const server = requireServer(id);
+      const props = server.properties || {};
+      return {
+        ...javaProcess.getStatus(id),
+        maxPlayers: Number(props['max-players']) || 20,
+        port: Number(props['server-port']) || 25565,
+        joinAddress: server.joinAddress || null,
+      };
+    },
+
+    // Dirección propia de este servidor (la de su túnel de playit.gg). Vacía = la general.
+    'servers:setJoinAddress': ({ id, address }) => {
+      const server = requireServer(id);
+      server.joinAddress = playit.normalizeJoinAddress(address);
+      store.saveServer(server);
+      return server.joinAddress;
+    },
+
+    'app:playitStatus': async () => ({ running: await playit.isAgentRunning() }),
+
+    'app:connectionInfo': () => ({ publicAddress: settings.getPublicAddress(), lanIp: lanIpv4() }),
+    'app:setPublicAddress': (value) => settings.setPublicAddress(value),
+
+    // DuckDNS (el token nunca sale de aquí: publicInfo solo dice si está puesto)
+    'app:getDuckDns': () => duckdns.publicInfo(),
+    'app:setDuckDns': ({ subdomain, token }) => duckdns.configure({ subdomain, token }),
+    'app:updateDuckDnsNow': () => duckdns.updateNow(),
+    'app:removeDuckDns': () => duckdns.remove(),
     'servers:getPlayers': (id) => javaProcess.getPlayers(id),
     'servers:resourceUsage': (id) => javaProcess.getResourceUsage(id),
 

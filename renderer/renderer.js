@@ -37,6 +37,7 @@ async function init() {
     btn.addEventListener('click', () => switchTab(btn.dataset.tab));
   });
 
+  document.getElementById('settingsBtn').addEventListener('click', openSettings);
   document.getElementById('btnStart').addEventListener('click', onStart);
   document.getElementById('btnStop').addEventListener('click', onStop);
   document.getElementById('btnOpenFolder').addEventListener('click', () =>
@@ -104,6 +105,7 @@ function renderSidebar() {
       <div class="chip-row">
         <span class="chip chip-accent">${labelForLoader(server.loader)}</span>
         <span class="chip">${escapeHtml(server.mcVersion)}</span>
+        ${server.access === 'owner' ? '<span class="chip">tuyo</span>' : server.owner ? `<span class="chip">de ${escapeHtml(server.owner)}</span>` : ''}
       </div>
     `;
     el.addEventListener('click', () => selectServer(server.id));
@@ -166,6 +168,7 @@ async function selectServer(id) {
   renderSidebar();
 
   document.getElementById('emptyState').hidden = true;
+  document.getElementById('settingsView').hidden = true;
   document.getElementById('serverView').hidden = false;
 
   const server = await window.api.getServer(id);
@@ -177,8 +180,8 @@ async function selectServer(id) {
   `;
 
   await refreshStatus(server);
-  switchTab('console', server);
   bindConsole(server);
+  switchTab('home', server);
 }
 
 async function refreshStatus(server) {
@@ -199,15 +202,562 @@ async function refreshStatus(server) {
 
 async function switchTab(tabName, serverArg) {
   state.currentTab = tabName;
+  document.getElementById('serverView').dataset.tab = tabName;
   document.querySelectorAll('.tab').forEach((b) => b.classList.toggle('active', b.dataset.tab === tabName));
-  ['overview', 'config', 'mods', 'console'].forEach((t) => {
+  ['home', 'overview', 'config', 'mods', 'console'].forEach((t) => {
     document.getElementById(`tab-${t}`).hidden = t !== tabName;
   });
+  if (tabName !== 'home') stopHomePolling();
 
   const server = serverArg || (await window.api.getServer(state.selectedId));
+  if (tabName === 'home') renderHome(server);
   if (tabName === 'overview') renderOverview(server);
   if (tabName === 'config') renderConfig(server);
   if (tabName === 'mods') renderMods(server);
+}
+
+// ---------------------------------------------------------------------------
+// Inicio (página estilo Aternos: estado, botón grande y dirección)
+// ---------------------------------------------------------------------------
+
+const HOME_STATES = {
+  offline: { label: 'Apagado', button: 'Iniciar', action: 'start' },
+  starting: { label: 'Iniciando…', button: 'Detener', action: 'stop' },
+  online: { label: 'En línea', button: 'Detener', action: 'stop' },
+  stopping: { label: 'Deteniendo…', button: 'Deteniendo…', action: null },
+};
+
+let homePollTimer = null;
+let homeServerId = null;
+let homeBusy = false;
+
+function stopHomePolling() {
+  if (homePollTimer) clearInterval(homePollTimer);
+  homePollTimer = null;
+  homeServerId = null;
+}
+
+function isLocalHostname(host) {
+  return !host || host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '[::1]';
+}
+
+/**
+ * Qué dirección dar a los amigos: la pública configurada; si no hay y estamos
+ * en la web abierta desde un dominio, ese mismo dominio; si no, la IP de la red
+ * local (solo sirve para quien esté en tu misma WiFi).
+ */
+function resolveJoinHost(info) {
+  if (info && info.publicAddress) return { host: info.publicAddress, scope: 'public' };
+  const inBrowser = window.location.protocol.startsWith('http');
+  if (inBrowser && !isLocalHostname(window.location.hostname)) {
+    return { host: window.location.hostname, scope: 'public' };
+  }
+  if (info && info.lanIp) return { host: info.lanIp, scope: 'lan' };
+  return { host: 'localhost', scope: 'local' };
+}
+
+function formatDuration(ms) {
+  const minutes = Math.floor(ms / 60000);
+  if (minutes < 1) return 'menos de un minuto';
+  if (minutes < 60) return `${minutes} min`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours} h ${minutes % 60} min`;
+}
+
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch (e) {
+    // Sin permiso de portapapeles (p. ej. web sin HTTPS): método clásico.
+    const area = document.createElement('textarea');
+    area.value = text;
+    area.style.position = 'fixed';
+    area.style.opacity = '0';
+    document.body.appendChild(area);
+    area.select();
+    const ok = document.execCommand('copy');
+    area.remove();
+    return ok;
+  }
+}
+
+async function renderHome(server) {
+  const el = document.getElementById('tab-home');
+  el.innerHTML = `
+    <div class="home-hero" data-state="offline">
+      <div class="home-state"><span class="home-dot"></span><span id="homeStateLabel">…</span></div>
+      <button id="homeToggle" type="button" class="home-button">…</button>
+      <p id="homeSubline" class="home-subline"></p>
+
+      <div class="home-address">
+        <span class="home-address-label">Dirección para conectarse</span>
+        <div class="home-address-row">
+          <code id="homeAddress">…</code>
+          <button id="homeCopy" type="button" class="btn btn-ghost">Copiar</button>
+        </div>
+        <p id="homeAddressHint" class="hint"></p>
+        <button id="homeEditAddress" type="button" class="home-link">Configurar dirección (playit.gg)</button>
+      </div>
+
+      <div class="home-stats">
+        <div><span class="home-stat-value" id="homePlayers">0 / 0</span><span class="home-stat-label">jugadores</span></div>
+        <div><span class="home-stat-value">${escapeHtml(labelForLoader(server.loader))}</span><span class="home-stat-label">software</span></div>
+        <div><span class="home-stat-value">${escapeHtml(server.mcVersion)}</span><span class="home-stat-label">versión</span></div>
+      </div>
+    </div>
+
+    <div class="card home-console-card">
+      <div class="home-console-head">
+        <h3>Consola</h3>
+        <button id="homeOpenConsole" type="button" class="home-link">Ver consola completa</button>
+      </div>
+      <pre id="homeConsole" class="home-console"></pre>
+    </div>
+  `;
+
+  document.getElementById('homeOpenConsole').addEventListener('click', () => switchTab('console'));
+  document.getElementById('homeToggle').addEventListener('click', () => onHomeToggle(server));
+  document.getElementById('homeCopy').addEventListener('click', async () => {
+    const button = document.getElementById('homeCopy');
+    const ok = await copyText(document.getElementById('homeAddress').textContent);
+    button.textContent = ok ? '¡Copiada!' : 'No se pudo copiar';
+    setTimeout(() => { if (document.getElementById('homeCopy')) button.textContent = 'Copiar'; }, 1500);
+  });
+  document.getElementById('homeEditAddress').addEventListener('click', openSettings);
+
+  updateHomeConsole();
+  stopHomePolling();
+  homeServerId = server.id;
+  await refreshHome(server);
+  homePollTimer = setInterval(() => refreshHome(server), 2000);
+}
+
+async function refreshHome(server) {
+  if (homeServerId !== server.id) return;
+  if (state.selectedId !== server.id) {
+    stopHomePolling();
+    return;
+  }
+  const hero = document.querySelector('#tab-home .home-hero');
+  if (!hero) return;
+
+  let status;
+  let info;
+  try {
+    [status, info] = await Promise.all([
+      window.api.getServerStatus(server.id),
+      window.api.getConnectionInfo().catch(() => null),
+    ]);
+  } catch (error) {
+    return; // p. ej. servidor borrado o sin conexión: el siguiente refresco lo reintenta
+  }
+  if (homeServerId !== server.id) return;
+
+  const view = HOME_STATES[status.state] || HOME_STATES.offline;
+  hero.dataset.state = status.state;
+  document.getElementById('homeStateLabel').textContent = view.label;
+
+  const button = document.getElementById('homeToggle');
+  button.textContent = view.button;
+  button.dataset.action = view.action || '';
+  button.disabled = !view.action || homeBusy;
+
+  let subline = '';
+  if (status.state === 'online' && status.readyAt) subline = `En línea desde hace ${formatDuration(Date.now() - status.readyAt)}`;
+  else if (status.state === 'starting' && status.startedAt) subline = `Arrancando desde hace ${formatDuration(Date.now() - status.startedAt)}. Los servidores con muchos mods tardan varios minutos.`;
+  else if (status.state === 'stopping') subline = 'Guardando el mundo antes de apagarse…';
+  else subline = 'Pulsa Iniciar cuando quieras jugar.';
+  document.getElementById('homeSubline').textContent = subline;
+
+  document.getElementById('homePlayers').textContent = `${status.players.length} / ${status.maxPlayers}`;
+
+  let { host, scope } = resolveJoinHost(info);
+  let address = status.port === 25565 ? host : `${host}:${status.port}`;
+  if (status.joinAddress) {
+    // Dirección del túnel de playit de este servidor: ya lleva su propio puerto si hace falta.
+    address = status.joinAddress;
+    scope = 'public';
+  }
+  document.getElementById('homeAddress').textContent = address;
+  document.getElementById('homeAddressHint').textContent =
+    scope === 'public'
+      ? 'En Minecraft: Multijugador → Añadir servidor, y pega esta dirección.'
+      : scope === 'lan'
+        ? 'Esta dirección solo funciona para quien esté en tu misma red. Para jugar desde fuera, configura la dirección pública.'
+        : 'Solo funciona en este mismo equipo. Configura la dirección pública para tus amigos.';
+
+  // El punto de estado de la lista y los botones de la cabecera, al día.
+  refreshStatus(server);
+}
+
+async function onHomeToggle(server) {
+  const button = document.getElementById('homeToggle');
+  const action = button.dataset.action;
+  if (!action || homeBusy) return;
+  homeBusy = true;
+  button.disabled = true;
+  try {
+    if (action === 'start') await onStart();
+    else await onStop();
+  } finally {
+    homeBusy = false;
+    setTimeout(() => refreshHome(server), 300);
+  }
+}
+
+/** Últimas líneas de la consola en la página de inicio. */
+function updateHomeConsole() {
+  const target = document.getElementById('homeConsole');
+  if (!target) return;
+  const full = document.getElementById('consoleLog').textContent;
+  const lines = full.slice(-6000).split('\n').filter((l) => l.trim() !== '');
+  target.textContent = lines.length ? lines.slice(-12).join('\n') : 'Todavía no hay nada en la consola.';
+  target.scrollTop = target.scrollHeight;
+}
+
+// ---------------------------------------------------------------------------
+// Ajustes (dirección pública y DuckDNS)
+// ---------------------------------------------------------------------------
+
+function openSettings() {
+  clearNotice();
+  stopHomePolling();
+  document.getElementById('emptyState').hidden = true;
+  document.getElementById('serverView').hidden = true;
+  document.getElementById('wizardOverlay').hidden = true;
+  document.getElementById('settingsView').hidden = false;
+  renderSettings();
+}
+
+function closeSettings() {
+  document.getElementById('settingsView').hidden = true;
+  if (state.selectedId) selectServer(state.selectedId);
+  else document.getElementById('emptyState').hidden = false;
+}
+
+const IS_WEB = window.location.protocol.startsWith('http');
+
+async function renderSettings() {
+  const el = document.getElementById('settingsView');
+  let info = null;
+  let duck = { configured: false };
+  let playitStatus = { running: false };
+  let servers = [];
+  try {
+    [info, duck, playitStatus, servers] = await Promise.all([
+      window.api.getConnectionInfo(),
+      window.api.getDuckDns(),
+      window.api.getPlayitStatus().catch(() => ({ running: false })),
+      window.api.listServers(),
+    ]);
+  } catch (error) {
+    el.innerHTML = `<p class="error-text">${escapeHtml(error.message)}</p>`;
+    return;
+  }
+
+  let duckStatus = '<span class="hint">Sin configurar.</span>';
+  if (duck.configured && duck.lastError) {
+    duckStatus = `<span class="settings-status bad">✕ ${escapeHtml(duck.lastError)}</span>`;
+  } else if (duck.configured && duck.lastUpdate) {
+    duckStatus = `<span class="settings-status good">✓ Funcionando: ${escapeHtml(duck.domain)} apunta a tu conexión (comprobado hace ${formatDuration(Date.now() - duck.lastUpdate)}).</span>`;
+  }
+
+  const tunnelRows = servers.map((srv) => {
+    const port = Number((srv.properties || {})['server-port']) || 25565;
+    return `
+      <tr>
+        <td>${escapeHtml(srv.name)}${srv.owner ? ` <span class="hint">(de ${escapeHtml(srv.owner)})</span>` : ''}</td>
+        <td><code>127.0.0.1:${port}</code></td>
+        <td><input type="text" class="tunnel-input" data-id="${escapeHtml(srv.id)}" placeholder="algo.joinmc.link" value="${escapeHtml(srv.joinAddress || '')}" /></td>
+      </tr>`;
+  }).join('');
+
+  el.innerHTML = `
+    <div class="settings-head">
+      <h1>Ajustes</h1>
+      <button id="settingsClose" type="button" class="btn btn-ghost">Volver</button>
+    </div>
+
+    ${IS_WEB ? '<div class="card" id="webTunnelCard"><h3>Enlace de la web para tus amigos</h3><p class="hint">Cargando…</p></div>' : ''}
+
+    <div class="card">
+      <h3>Enlace para jugar: playit.gg (sin abrir puertos y sin mostrar tu IP)</h3>
+      <p class="settings-line">${playitStatus.running
+        ? '<span class="settings-status good">✓ El programa de playit está en marcha en este PC.</span>'
+        : '<span class="settings-status bad">✕ No se detecta el programa de playit en este PC.</span>'}</p>
+      <ol class="settings-steps">
+        <li>Descarga e instala el programa desde <strong>playit.gg/download</strong> y ábrelo.</li>
+        <li>La primera vez te dará un enlace de <em>claim</em>: ábrelo, crea tu cuenta (gratis) y vincula este PC.</li>
+        <li>En el panel de playit, pulsa <em>Add tunnel</em>, elige <strong>Minecraft Java</strong> y como destino la dirección local del servidor que ves abajo.</li>
+        <li>Copia la dirección que te da playit (algo como <code>xxxx.joinmc.link</code>) y pégala en su fila. Es la que verán tus amigos en Inicio.</li>
+      </ol>
+      <p class="hint">El plan gratis permite <strong>4 túneles</strong>, así que como mucho 4 servidores con dirección de playit. Deja el programa de playit abierto mientras se juega: si se cierra, el túnel se corta.</p>
+      ${servers.length ? `
+      <div class="tunnel-table-wrap">
+        <table class="mods-table tunnel-table">
+          <thead><tr><th>Servidor</th><th>Destino del túnel en playit</th><th>Dirección que te da playit</th></tr></thead>
+          <tbody>${tunnelRows}</tbody>
+        </table>
+      </div>
+      <div class="settings-actions"><button id="tunnelsSave" type="button" class="btn btn-accent">Guardar direcciones</button></div>
+      <p id="tunnelsStatus" class="settings-line"></p>` : '<p class="hint">Todavía no hay servidores.</p>'}
+    </div>
+
+    ${IS_WEB ? '<div class="card" id="usersCard"><h3>Usuarios</h3><p class="hint">Cargando…</p></div>' : ''}
+
+    <details class="card settings-alt">
+      <summary><h3>Alternativa: abrir puertos en el router + DuckDNS</h3></summary>
+      <p class="hint">Si prefieres no usar playit: reenvía en el router el puerto 25565 (y 25566–25599 para servidores de amigos) y usa DuckDNS para dar un nombre en vez de tu IP. Ojo: con este método tu IP sí se puede averiguar.</p>
+      <div class="form-grid">
+        <div class="field">
+          <label for="duckSubdomain">Subdominio de DuckDNS</label>
+          <input type="text" id="duckSubdomain" placeholder="miserver" value="${escapeHtml(duck.subdomain || '')}" autocomplete="off" />
+        </div>
+        <div class="field">
+          <label for="duckToken">Token</label>
+          <input type="password" id="duckToken" autocomplete="off" placeholder="${duck.configured ? `Guardado (${escapeHtml(duck.tokenHint)})` : 'a1b2c3d4-e5f6-7890-abcd-ef1234567890'}" />
+          ${duck.configured ? '<span class="hint">Déjalo vacío para mantener el guardado.</span>' : ''}
+        </div>
+      </div>
+      <div class="settings-actions">
+        <button id="duckSave" type="button" class="btn btn-ghost">Guardar y comprobar</button>
+        ${duck.configured ? '<button id="duckUpdate" type="button" class="btn btn-ghost">Actualizar ahora</button><button id="duckRemove" type="button" class="btn btn-ghost">Quitar DuckDNS</button>' : ''}
+      </div>
+      <p id="duckStatus" class="settings-line">${duckStatus}</p>
+      <div class="settings-actions">
+        <input type="text" id="publicAddressInput" placeholder="Dirección general (tuservidor.duckdns.org)" value="${escapeHtml((info && info.publicAddress) || '')}" />
+        <button id="publicAddressSave" type="button" class="btn btn-ghost">Guardar dirección general</button>
+      </div>
+      <p id="publicAddressStatus" class="settings-line"></p>
+    </details>
+  `;
+
+  document.getElementById('settingsClose').addEventListener('click', closeSettings);
+
+  // ---- Túneles de playit
+  const tunnelsSave = document.getElementById('tunnelsSave');
+  if (tunnelsSave) tunnelsSave.addEventListener('click', async () => {
+    const line = document.getElementById('tunnelsStatus');
+    try {
+      for (const input of document.querySelectorAll('.tunnel-input')) {
+        await window.api.setServerJoinAddress(input.dataset.id, input.value);
+      }
+      line.innerHTML = '<span class="settings-status good">✓ Guardado. Tus amigos ya ven estas direcciones en Inicio.</span>';
+    } catch (error) {
+      line.innerHTML = `<span class="settings-status bad">✕ ${escapeHtml(error.message)}</span>`;
+    }
+  });
+
+  // ---- DuckDNS (alternativa)
+  const status = document.getElementById('duckStatus');
+  document.getElementById('duckSave').addEventListener('click', async (event) => {
+    event.target.disabled = true;
+    status.innerHTML = '<span class="hint">Comprobando con DuckDNS…</span>';
+    try {
+      await window.api.setDuckDns(document.getElementById('duckSubdomain').value, document.getElementById('duckToken').value);
+      renderSettings();
+    } catch (error) {
+      status.innerHTML = `<span class="settings-status bad">✕ ${escapeHtml(error.message)}</span>`;
+      event.target.disabled = false;
+    }
+  });
+  const updateBtn = document.getElementById('duckUpdate');
+  if (updateBtn) updateBtn.addEventListener('click', async () => {
+    updateBtn.disabled = true;
+    await window.api.updateDuckDnsNow().catch(() => {});
+    renderSettings();
+  });
+  const removeBtn = document.getElementById('duckRemove');
+  if (removeBtn) removeBtn.addEventListener('click', async () => {
+    if (!confirm('¿Quitar DuckDNS? La app dejará de actualizar tu dominio.')) return;
+    await window.api.removeDuckDns();
+    renderSettings();
+  });
+  document.getElementById('publicAddressSave').addEventListener('click', async () => {
+    const line = document.getElementById('publicAddressStatus');
+    try {
+      const saved = await window.api.setPublicAddress(document.getElementById('publicAddressInput').value);
+      line.innerHTML = `<span class="settings-status good">✓ ${saved ? `Guardada: ${escapeHtml(saved)}` : 'Quitada'}</span>`;
+    } catch (error) {
+      line.innerHTML = `<span class="settings-status bad">✕ ${escapeHtml(error.message)}</span>`;
+    }
+  });
+
+  if (IS_WEB) {
+    renderWebTunnelCard();
+    renderUsersCard();
+  }
+}
+
+/** Enlace público de la web con Cloudflare (solo versión web). */
+async function renderWebTunnelCard(preset) {
+  const card = document.getElementById('webTunnelCard');
+  if (!card) return;
+  let tunnel = preset;
+  try {
+    if (!tunnel) tunnel = await window.api.getWebTunnel();
+  } catch (error) {
+    card.innerHTML = `<h3>Enlace de la web para tus amigos</h3><p class="error-text">${escapeHtml(error.message)}</p>`;
+    return;
+  }
+
+  let body;
+  if (tunnel.phase === 'running') {
+    body = `
+      <p class="settings-line"><span class="settings-status good">✓ Activo. Pásales este enlace a tus amigos:</span></p>
+      <div class="settings-actions">
+        <code class="tunnel-url" id="webTunnelUrl">${escapeHtml(tunnel.url)}</code>
+        <button id="webTunnelCopy" type="button" class="btn btn-accent">Copiar</button>
+        <button id="webTunnelStop" type="button" class="btn btn-ghost">Desactivar</button>
+      </div>
+      <p class="hint">Este enlace <strong>cambia cada vez que reinicias la web</strong> o desactivas el túnel: tendrás que volver a pasarlo.</p>`;
+  } else if (tunnel.phase === 'starting') {
+    body = '<p class="settings-line"><span class="hint">Pidiendo un enlace a Cloudflare… (puede tardar unos segundos)</span></p>';
+  } else {
+    body = `
+      ${tunnel.error ? `<p class="settings-line"><span class="settings-status bad">✕ ${escapeHtml(tunnel.error)}</span></p>` : ''}
+      ${tunnel.installed === false ? `
+        <p class="hint">Primero instala el programa de Cloudflare (gratis, sin cuenta). En Windows, en una terminal:</p>
+        <p><code>winget install --id Cloudflare.cloudflared</code></p>
+        <p class="hint">Después cierra y vuelve a abrir <code>npm run web</code> para que lo encuentre.</p>` : ''}
+      <div class="settings-actions">
+        <button id="webTunnelStart" type="button" class="btn btn-accent">Activar enlace público</button>
+      </div>`;
+  }
+
+  card.innerHTML = `
+    <h3>Enlace de la web para tus amigos (Cloudflare)</h3>
+    <p class="hint">Crea una dirección <code>https://….trycloudflare.com</code> para que tus amigos entren a esta web desde su casa, se registren y enciendan los mundos. Es gratis, va con HTTPS y <strong>no muestra tu IP</strong>. No hay que abrir puertos.</p>
+    ${body}
+    <label class="user-check settings-line"><input type="checkbox" id="webTunnelAuto" ${tunnel.autoStart ? 'checked' : ''} /> Activarlo solo cada vez que arranque la web</label>
+    <p class="hint">Cualquiera con el enlace puede ver la pantalla de entrar, pero nadie puede usar la web sin una cuenta que tú hayas aprobado.</p>
+  `;
+
+  const startBtn = document.getElementById('webTunnelStart');
+  if (startBtn) startBtn.addEventListener('click', async () => {
+    renderWebTunnelCard({ ...tunnel, phase: 'starting', error: null });
+    try {
+      renderWebTunnelCard(await window.api.startWebTunnel());
+    } catch (error) {
+      renderWebTunnelCard({ ...tunnel, phase: 'error', error: error.message });
+    }
+  });
+  const stopBtn = document.getElementById('webTunnelStop');
+  if (stopBtn) stopBtn.addEventListener('click', async () => {
+    if (!confirm('¿Desactivar el enlace público? Tus amigos no podrán entrar, y al activarlo de nuevo el enlace será otro.')) return;
+    renderWebTunnelCard(await window.api.stopWebTunnel());
+  });
+  const copyBtn = document.getElementById('webTunnelCopy');
+  if (copyBtn) copyBtn.addEventListener('click', async () => {
+    const ok = await copyText(tunnel.url);
+    copyBtn.textContent = ok ? '¡Copiado!' : 'No se pudo copiar';
+    setTimeout(() => { copyBtn.textContent = 'Copiar'; }, 1500);
+  });
+  document.getElementById('webTunnelAuto').addEventListener('change', async (event) => {
+    await window.api.setWebTunnelAutostart(event.target.checked);
+  });
+}
+
+/** Gestión de cuentas (solo versión web): aprobar registros, roles, comandos, contraseñas. */
+async function renderUsersCard() {
+  const card = document.getElementById('usersCard');
+  if (!card) return;
+  let users;
+  try {
+    users = await window.api.listUsers();
+  } catch (error) {
+    card.innerHTML = `<h3>Usuarios</h3><p class="error-text">${escapeHtml(error.message)}</p>`;
+    return;
+  }
+  const me = document.body.dataset.user || '';
+  const pending = users.filter((u) => u.status === 'pendiente');
+  const active = users.filter((u) => u.status !== 'pendiente');
+
+  const pendingHtml = pending.length
+    ? pending.map((u) => `
+      <div class="user-row pending">
+        <span class="user-name">${escapeHtml(u.username)}</span>
+        <span class="hint">se registró ${new Date(u.createdAt).toLocaleString()}</span>
+        <span class="user-actions">
+          <button type="button" class="btn btn-accent" data-user-action="approve" data-user="${escapeHtml(u.username)}">Aprobar</button>
+          <button type="button" class="btn btn-ghost" data-user-action="reject" data-user="${escapeHtml(u.username)}">Rechazar</button>
+        </span>
+      </div>`).join('')
+    : '<p class="hint">No hay cuentas esperando aprobación.</p>';
+
+  const activeHtml = active.map((u) => {
+    const isMe = u.username.toLowerCase() === me.toLowerCase();
+    return `
+      <div class="user-row">
+        <span class="user-name">${escapeHtml(u.username)}${isMe ? ' <span class="hint">(tú)</span>' : ''}</span>
+        <select data-user-action="role" data-user="${escapeHtml(u.username)}" ${isMe ? 'disabled' : ''}>
+          <option value="amigo" ${u.role === 'amigo' ? 'selected' : ''}>Amigo</option>
+          <option value="admin" ${u.role === 'admin' ? 'selected' : ''}>Administrador</option>
+        </select>
+        ${u.role === 'amigo' ? `<label class="user-check"><input type="checkbox" data-user-action="commands" data-user="${escapeHtml(u.username)}" ${u.canSendCommands ? 'checked' : ''} /> Puede escribir comandos en tus servidores</label>` : '<span></span>'}
+        <span class="user-actions">
+          <button type="button" class="btn btn-ghost" data-user-action="reset" data-user="${escapeHtml(u.username)}">Nueva contraseña</button>
+          ${isMe ? '' : `<button type="button" class="btn btn-ghost" data-user-action="delete" data-user="${escapeHtml(u.username)}">Borrar</button>`}
+        </span>
+      </div>`;
+  }).join('');
+
+  card.innerHTML = `
+    <h3>Usuarios</h3>
+    <p class="hint">Quien quiera entrar se crea la cuenta en la pantalla de inicio de sesión ("Crear una") y aparece aquí para que la apruebes.</p>
+    <h4 class="users-subtitle">Pendientes de aprobar${pending.length ? ` (${pending.length})` : ''}</h4>
+    ${pendingHtml}
+    <h4 class="users-subtitle">Cuentas activas</h4>
+    ${activeHtml}
+    <p id="usersStatus" class="settings-line"></p>
+  `;
+
+  const say = (html) => { document.getElementById('usersStatus').innerHTML = html; };
+  const fail = (error) => say(`<span class="settings-status bad">✕ ${escapeHtml(error.message)}</span>`);
+
+  card.querySelectorAll('button[data-user-action]').forEach((btn) => btn.addEventListener('click', async () => {
+    const { userAction, user } = btn.dataset;
+    try {
+      if (userAction === 'approve') await window.api.approveUser(user);
+      if (userAction === 'reject') {
+        if (!confirm(`¿Rechazar y borrar la solicitud de "${user}"?`)) return;
+        await window.api.rejectUser(user);
+      }
+      if (userAction === 'delete') {
+        if (!confirm(`¿Borrar la cuenta de "${user}"? Sus servidores no se borran.`)) return;
+        await window.api.deleteUser(user);
+      }
+      if (userAction === 'reset') {
+        if (!confirm(`¿Crear una contraseña nueva para "${user}"? La actual dejará de funcionar.`)) return;
+        const temporary = await window.api.resetUserPassword(user);
+        await renderUsersCard();
+        say(`<span class="settings-status good">Contraseña temporal de <strong>${escapeHtml(user)}</strong>: <code>${escapeHtml(temporary)}</code>. Pásasela por privado; podrá cambiarla con "Cambiar contraseña" abajo a la derecha. Solo se muestra esta vez.</span>`);
+        return;
+      }
+      await renderUsersCard();
+    } catch (error) {
+      fail(error);
+    }
+  }));
+
+  card.querySelectorAll('select[data-user-action="role"]').forEach((select) => select.addEventListener('change', async () => {
+    try {
+      await window.api.setUserRole(select.dataset.user, select.value);
+      await renderUsersCard();
+    } catch (error) {
+      fail(error);
+      await renderUsersCard();
+    }
+  }));
+
+  card.querySelectorAll('input[data-user-action="commands"]').forEach((box) => box.addEventListener('change', async () => {
+    try {
+      await window.api.setUserCommands(box.dataset.user, box.checked);
+    } catch (error) {
+      fail(error);
+    }
+  }));
 }
 
 // ---------------------------------------------------------------------------
@@ -931,6 +1481,7 @@ function appendConsole(text) {
     log.textContent = log.textContent.slice(cutAt === -1 ? excess : cutAt + 1);
   }
   log.scrollTop = log.scrollHeight;
+  if (state.currentTab === 'home') updateHomeConsole();
 }
 
 async function sendConsoleCommand() {
@@ -1046,6 +1597,7 @@ function openWizard() {
   };
   document.getElementById('emptyState').hidden = true;
   document.getElementById('serverView').hidden = true;
+  document.getElementById('settingsView').hidden = true;
   document.getElementById('wizardOverlay').hidden = false;
   renderWizardEntry();
 }
