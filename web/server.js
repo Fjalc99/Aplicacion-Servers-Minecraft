@@ -256,8 +256,65 @@ function createWebServer() {
       : { title: 'Enlace público caído', body: 'El túnel de Cloudflare se ha cerrado. Actívalo de nuevo en Ajustes.' });
   });
 
+  // ---------------------------------------------------------------------------
+  // Cola de arranque: si un amigo pulsa Iniciar y el PC no tiene memoria libre,
+  // su servidor espera su turno y arranca solo cuando se apague otro.
+  // ---------------------------------------------------------------------------
+  const startQueue = []; // [{ serverId, username, queuedAt }]
+
+  function queuePosition(serverId) {
+    const index = startQueue.findIndex((entry) => entry.serverId === serverId);
+    return index === -1 ? null : index + 1;
+  }
+
+  function enqueueStart(serverId, username) {
+    if (!queuePosition(serverId)) startQueue.push({ serverId, username, queuedAt: Date.now() });
+    return queuePosition(serverId);
+  }
+
+  function activeUser(username) {
+    const found = auth.listUsers().find((u) => u.username.toLowerCase() === username.toLowerCase() && u.status !== 'pendiente');
+    return found ? { username: found.username, role: found.role, canSendCommands: found.canSendCommands } : null;
+  }
+
+  /** Arranca por orden lo que haya en la cola mientras quepa en la memoria. */
+  function processStartQueue() {
+    while (startQueue.length > 0) {
+      const entry = startQueue[0];
+      const server = store.getServer(entry.serverId);
+      const user = activeUser(entry.username);
+      if (!server || !user || javaProcess.isRunning(entry.serverId)) {
+        startQueue.shift(); // borrado, cuenta borrada, o ya lo encendió alguien
+        continue;
+      }
+      const decision = access.authorize(user, 'servers:start', entry.serverId, {
+        allServers: store.listServers(),
+        isRunning: (id) => javaProcess.isRunning(id),
+      });
+      if (!decision.ok && decision.code === 'ram') return; // sigue sin caber: se respeta el orden
+      startQueue.shift();
+      if (!decision.ok) {
+        sendToUser(entry.username, 'app:notify', { title: 'Salió de la cola', body: `"${server.name}" no se ha podido encender: ${decision.error}` });
+        continue;
+      }
+      try {
+        core.handlers['servers:start'](entry.serverId, { user, reply: () => {} });
+        sendToUser(entry.username, 'app:notify', { title: 'Tu turno', body: `"${server.name}" se está encendiendo.` });
+      } catch (err) {
+        sendToUser(entry.username, 'app:notify', { title: 'Salió de la cola', body: `"${server.name}" no se ha podido encender: ${err.message}` });
+      }
+    }
+  }
+
+  const queueTimer = setInterval(processStartQueue, 30000);
+  queueTimer.unref();
+
   const core = createAppCore({
-    send: (channel, payload) => broadcast(channel, payload),
+    send: (channel, payload) => {
+      broadcast(channel, payload);
+      // Al apagarse un servidor queda memoria libre: se revisa la cola.
+      if (channel.startsWith('servers:exit:')) setTimeout(processStartQueue, 1500);
+    },
     notify: (title, body, serverId) => broadcast('app:notify', { title, body }, { serverId }),
   });
 
@@ -275,6 +332,18 @@ function createWebServer() {
 
     'mods:showInFolder': (filePath) => {
       openInFileManager(filePath, { select: true });
+      return true;
+    },
+
+    // ---------- Cola de arranque ----------
+    'servers:leaveQueue': (id, ctx) => {
+      const index = startQueue.findIndex((entry) => entry.serverId === id);
+      if (index === -1) return true;
+      const entry = startQueue[index];
+      if (ctx.user.role !== 'admin' && entry.username.toLowerCase() !== ctx.user.username.toLowerCase()) {
+        throw new Error('Solo quien lo puso en la cola (o un administrador) puede quitarlo.');
+      }
+      startQueue.splice(index, 1);
       return true;
     },
 
@@ -327,12 +396,15 @@ function createWebServer() {
    * los que tiene acceso (con un campo "access" para la interfaz), y lo que crea
    * un amigo queda a su nombre.
    */
-  function afterInvoke(user, channel, result) {
+  function afterInvoke(user, channel, result, arg) {
     if (channel === 'servers:list' && Array.isArray(result)) {
       return result.map((server) => access.withAccess(user, server)).filter(Boolean);
     }
     if (channel === 'servers:get') {
       return result ? access.withAccess(user, result) : result;
+    }
+    if (channel === 'servers:status' && result && typeof arg === 'string') {
+      return { ...result, queuePosition: queuePosition(arg) };
     }
     if (channel === 'servers:create' && result && result.ok && result.server && user.role !== 'admin') {
       const saved = store.getServer(result.server.id);
@@ -365,6 +437,11 @@ function createWebServer() {
       isRunning: (id) => javaProcess.isRunning(id),
     });
     if (!decision.ok) {
+      if (decision.code === 'ram' && body.channel === 'servers:start') {
+        const position = enqueueStart(access.serverIdFromArg(body.arg), user.username);
+        sendJson(res, 200, { result: { queued: true, position } });
+        return;
+      }
       sendJson(res, decision.status, { error: decision.error });
       return;
     }
@@ -374,7 +451,7 @@ function createWebServer() {
         user,
         reply: (channel, payload) => sendToUser(user.username, channel, payload),
       });
-      result = afterInvoke(user, body.channel, result);
+      result = afterInvoke(user, body.channel, result, decision.arg);
       sendJson(res, 200, { result });
     } catch (err) {
       // Igual que en Electron: el error llega a la interfaz como una promesa rechazada.
@@ -597,7 +674,8 @@ function createWebServer() {
   sweep.unref();
   server.on('close', () => clearInterval(sweep));
 
-  return { server, broadcast, sendToUser };
+  server.on('close', () => clearInterval(queueTimer));
+  return { server, broadcast, sendToUser, processStartQueue, startQueue };
 }
 
 /**

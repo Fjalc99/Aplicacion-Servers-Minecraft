@@ -32,6 +32,8 @@ contextBridge.exposeInMainWorld('api', {
   sendCommand: (id, command) => ipcRenderer.invoke('servers:sendCommand', { id, command }),
   isRunning: (id) => ipcRenderer.invoke('servers:isRunning', id),
   getServerStatus: (id) => ipcRenderer.invoke('servers:status', id),
+  updateAutoStop: (id, enabled, minutes) => ipcRenderer.invoke('servers:updateAutoStop', { id, enabled, minutes }),
+  leaveStartQueue: (id) => ipcRenderer.invoke('servers:leaveQueue', id),
   getConnectionInfo: () => ipcRenderer.invoke('app:connectionInfo'),
   setPublicAddress: (value) => ipcRenderer.invoke('app:setPublicAddress', value),
   getDuckDns: () => ipcRenderer.invoke('app:getDuckDns'),

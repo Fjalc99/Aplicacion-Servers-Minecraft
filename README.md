@@ -28,6 +28,7 @@ par de clics.
 - [playit.gg: jugar desde fuera sin abrir puertos](#playitgg-jugar-desde-fuera-sin-abrir-puertos-recomendado)
 - [DuckDNS integrado (alternativa)](#duckdns-integrado-alternativa)
 - [Página de inicio (estilo Aternos)](#página-de-inicio-estilo-aternos)
+- [Apagado automático y cola de espera](#apagado-automático-y-cola-de-espera)
 - [Versión web con acceso para amigos](#versión-web-con-acceso-para-amigos)
 - [Estructura del proyecto](#estructura-del-proyecto)
 - [Subir el proyecto a GitHub](#subir-el-proyecto-a-github)
@@ -598,6 +599,27 @@ Se elige en este orden:
 3. Si no, la IP de tu red local, avisando de que solo sirve para quien esté en tu
    misma WiFi.
 
+## Apagado automático y cola de espera
+
+**Apagado automático sin jugadores.** Viene activado en todos los servidores: si un
+servidor está *En línea* y no hay nadie conectado durante **10 minutos**, se apaga
+solo, guardando el mundo y haciendo el backup de "al detener" si lo tienes activado.
+- La cuenta atrás solo empieza cuando el servidor ha terminado de cargar, así que
+  un modpack que tarda en arrancar no se apaga a medias.
+- En cuanto entra alguien se cancela, y si luego se van todos vuelve a empezar.
+- En **Inicio** aparece un **reloj con la cuenta atrás** (minutos y segundos, en
+  naranja el último minuto). Se calcula con la hora de tu PC, así que marca bien
+  aunque el móvil u ordenador de un amigo tenga la hora mal puesta.
+- Se cambia en **Configuración → Fiabilidad**: se puede desactivar o poner entre 1
+  y 240 minutos. En tus servidores lo decides tú; en los suyos, cada amigo.
+
+**Cola de espera (versión web).** Si un amigo pulsa *Iniciar* pero el PC no tiene
+memoria libre (los encendidos ya ocupan el 85 % de la RAM), su servidor no da error:
+entra en una **cola**. En Inicio verá "En cola, posición 1" con un botón para salir
+de ella, y cuando se apague otro servidor (a mano o por el apagado automático), el
+primero de la cola se enciende solo y le llega un aviso. Las dos cosas juntas hacen
+que tu PC aguante a más amigos: los servidores olvidados se apagan y dejan sitio.
+
 ## Versión web con acceso para amigos
 
 Además de la app de escritorio, el proyecto se puede usar desde el navegador, con
@@ -671,8 +693,9 @@ Para que entre todos no dejen el PC sin memoria:
 | RAM máxima por servidor | 4096 MB | `MSM_AMIGO_MAX_RAM_MB` |
 | Puertos para sus servidores | 25566–25599 | `MSM_AMIGO_PUERTO_MIN` / `MSM_AMIGO_PUERTO_MAX` |
 
-Además, ningún amigo puede encender un servidor (suyo o compartido) si la RAM
-asignada a todos los encendidos pasaría del 85 % de la del PC.
+Además, si al encender un servidor (suyo o compartido) la RAM asignada a todos los
+encendidos pasaría del 85 % de la del PC, no se enciende en ese momento: entra en la
+cola de espera (ver [Apagado automático y cola de espera](#apagado-automático-y-cola-de-espera)).
 
 A cada servidor nuevo de un amigo se le asigna automáticamente un puerto libre de
 ese rango. Para que se pueda jugar en él desde fuera:

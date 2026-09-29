@@ -35,9 +35,11 @@ store.saveServer(fake('lleno2', 'lleno'));
 let server;
 let broadcast;
 let base;
+let processStartQueue;
+let startQueue;
 
 test.before(async () => {
-  ({ server, broadcast } = createWebServer());
+  ({ server, broadcast, processStartQueue, startQueue } = createWebServer());
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   base = `http://127.0.0.1:${server.address().port}`;
 });
@@ -244,6 +246,45 @@ test('detrás de Cloudflare: IP real de Cf-Connecting-Ip y http:// redirige a ht
   });
   assert.equal(res.status, 301);
   assert.equal(res.headers.get('location'), 'https://algo.trycloudflare.com/login');
+});
+
+test('cola: si no hay memoria, el arranque espera y sale solo cuando se libera', async () => {
+  const os = require('os');
+  const javaProcess = require('../src/javaProcess');
+  const original = { isRunning: javaProcess.isRunning, startServer: javaProcess.startServer };
+  const totalMb = Math.floor(os.totalmem() / 1024 / 1024);
+  const big = Math.floor(totalMb * 0.6); // dos de estos no caben a la vez
+  store.saveServer({ ...fake('grande1'), memory: big });
+  store.saveServer({ ...fake('grande2'), memory: big });
+
+  let running = new Set(['grande1']);
+  const started = [];
+  javaProcess.isRunning = (id) => running.has(id);
+  javaProcess.startServer = (server) => { started.push(server.id); running.add(server.id); };
+  try {
+    const amigo = await login('amigo', 'clave-amigo');
+    const res = await invoke(amigo, 'servers:start', 'grande2');
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.body.result, { queued: true, position: 1 });
+    assert.equal((await invoke(amigo, 'servers:status', 'grande2')).body.result.queuePosition, 1);
+
+    // Puede salir de la cola...
+    await invoke(amigo, 'servers:leaveQueue', 'grande2');
+    assert.equal((await invoke(amigo, 'servers:status', 'grande2')).body.result.queuePosition, null);
+
+    // ...y volver a entrar. Al apagarse el otro, arranca solo.
+    await invoke(amigo, 'servers:start', 'grande2');
+    processStartQueue();
+    assert.deepEqual(started, [], 'mientras el otro siga encendido, espera');
+    running.delete('grande1');
+    processStartQueue();
+    assert.deepEqual(started, ['grande2']);
+    assert.equal(startQueue.length, 0);
+  } finally {
+    Object.assign(javaProcess, original);
+    store.deleteServer('grande1');
+    store.deleteServer('grande2');
+  }
 });
 
 test('crear servidor: se deniega antes de descargar nada si está en su límite', async () => {
