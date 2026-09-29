@@ -1,6 +1,6 @@
 {
   "name": "minecraft-server-manager",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "description": "Gestor local de servidores de Minecraft (Vanilla / Forge / NeoForge) con detección automática de mods de servidor",
   "main": "main.js",
   "repository": {
