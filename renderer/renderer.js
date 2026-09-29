@@ -225,16 +225,65 @@ const HOME_STATES = {
   starting: { label: 'Iniciando…', button: 'Detener', action: 'stop' },
   online: { label: 'En línea', button: 'Detener', action: 'stop' },
   stopping: { label: 'Deteniendo…', button: 'Deteniendo…', action: null },
+  queued: { label: 'En cola', button: 'Salir de la cola', action: 'leave' },
 };
 
 let homePollTimer = null;
+let homeTickTimer = null;
 let homeServerId = null;
 let homeBusy = false;
+// Último estado recibido, para que el reloj avance cada segundo entre consultas.
+let homeClock = null;
 
 function stopHomePolling() {
   if (homePollTimer) clearInterval(homePollTimer);
+  if (homeTickTimer) clearInterval(homeTickTimer);
   homePollTimer = null;
+  homeTickTimer = null;
   homeServerId = null;
+  homeClock = null;
+}
+
+/** "3:05", "12:40" o "1:02:30". */
+function formatClock(ms) {
+  const total = Math.max(0, Math.ceil(ms / 1000));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const sec = String(total % 60).padStart(2, '0');
+  return h > 0 ? `${h}:${String(m).padStart(2, '0')}:${sec}` : `${m}:${sec}`;
+}
+
+/** Pinta la cuenta atrás y los tiempos con la hora del PC servidor (corrigiendo la del navegador). */
+function renderHomeClock() {
+  const box = document.getElementById('homeCountdown');
+  const subline = document.getElementById('homeSubline');
+  if (!box || !subline || !homeClock) return;
+  const now = Date.now() + homeClock.offset;
+  const { status, shownState } = homeClock;
+
+  const counting = status.state === 'online' && status.autoStopAt;
+  box.hidden = !counting;
+  if (counting) {
+    const remaining = status.autoStopAt - now;
+    document.getElementById('homeCountdownTime').textContent = remaining > 0 ? formatClock(remaining) : '0:00';
+    box.classList.toggle('urgent', remaining <= 60000);
+  }
+
+  let text;
+  if (shownState === 'queued') {
+    text = `Posición ${status.queuePosition} en la cola. El PC no tiene memoria libre ahora mismo: se encenderá solo en cuanto se apague otro servidor.`;
+  } else if (counting) {
+    text = status.autoStopAt - now > 0 ? 'No hay nadie conectado.' : 'No hay nadie conectado: apagando…';
+  } else if (status.state === 'online' && status.readyAt) {
+    text = `En línea desde hace ${formatDuration(now - status.readyAt)}`;
+  } else if (status.state === 'starting' && status.startedAt) {
+    text = `Arrancando desde hace ${formatDuration(now - status.startedAt)}. Los servidores con muchos mods tardan varios minutos.`;
+  } else if (status.state === 'stopping') {
+    text = 'Guardando el mundo antes de apagarse…';
+  } else {
+    text = 'Pulsa Iniciar cuando quieras jugar.';
+  }
+  subline.textContent = text;
 }
 
 function isLocalHostname(host) {
@@ -288,6 +337,10 @@ async function renderHome(server) {
     <div class="home-hero" data-state="offline">
       <div class="home-state"><span class="home-dot"></span><span id="homeStateLabel">…</span></div>
       <button id="homeToggle" type="button" class="home-button">…</button>
+      <div id="homeCountdown" class="home-countdown" hidden>
+        <span class="home-countdown-time" id="homeCountdownTime">--:--</span>
+        <span class="home-countdown-label">para el apagado automático si no entra nadie</span>
+      </div>
       <p id="homeSubline" class="home-subline"></p>
 
       <div class="home-address">
@@ -331,6 +384,7 @@ async function renderHome(server) {
   homeServerId = server.id;
   await refreshHome(server);
   homePollTimer = setInterval(() => refreshHome(server), 2000);
+  homeTickTimer = setInterval(renderHomeClock, 1000);
 }
 
 async function refreshHome(server) {
@@ -354,8 +408,9 @@ async function refreshHome(server) {
   }
   if (homeServerId !== server.id) return;
 
-  const view = HOME_STATES[status.state] || HOME_STATES.offline;
-  hero.dataset.state = status.state;
+  const shownState = status.state === 'offline' && status.queuePosition ? 'queued' : status.state;
+  const view = HOME_STATES[shownState] || HOME_STATES.offline;
+  hero.dataset.state = shownState;
   document.getElementById('homeStateLabel').textContent = view.label;
 
   const button = document.getElementById('homeToggle');
@@ -363,12 +418,12 @@ async function refreshHome(server) {
   button.dataset.action = view.action || '';
   button.disabled = !view.action || homeBusy;
 
-  let subline = '';
-  if (status.state === 'online' && status.readyAt) subline = `En línea desde hace ${formatDuration(Date.now() - status.readyAt)}`;
-  else if (status.state === 'starting' && status.startedAt) subline = `Arrancando desde hace ${formatDuration(Date.now() - status.startedAt)}. Los servidores con muchos mods tardan varios minutos.`;
-  else if (status.state === 'stopping') subline = 'Guardando el mundo antes de apagarse…';
-  else subline = 'Pulsa Iniciar cuando quieras jugar.';
-  document.getElementById('homeSubline').textContent = subline;
+  homeClock = {
+    status,
+    shownState,
+    offset: typeof status.now === 'number' ? status.now - Date.now() : 0,
+  };
+  renderHomeClock();
 
   document.getElementById('homePlayers').textContent = `${status.players.length} / ${status.maxPlayers}`;
 
@@ -399,6 +454,7 @@ async function onHomeToggle(server) {
   button.disabled = true;
   try {
     if (action === 'start') await onStart();
+    else if (action === 'leave') await window.api.leaveStartQueue(server.id);
     else await onStop();
   } finally {
     homeBusy = false;
@@ -976,6 +1032,15 @@ async function renderConfig(server) {
     <div class="card">
       <h3>Fiabilidad</h3>
       <div class="field field-inline">
+        <input type="checkbox" id="cfgAutoStop" ${server.autoStop && server.autoStop.enabled === false ? '' : 'checked'} />
+        <label for="cfgAutoStop">Apagar solo si no hay nadie jugando durante</label>
+        <input type="number" id="cfgAutoStopMinutes" min="1" max="240" step="1" style="width:80px;" value="${(server.autoStop && server.autoStop.minutes) || 10}" />
+        <span>minutos</span>
+      </div>
+      <p class="hint">Como en Aternos: la cuenta atrás empieza cuando el servidor termina de cargar y no hay nadie conectado, y se cancela en cuanto entra alguien. Así un servidor olvidado no se queda ocupando memoria.</p>
+      <p id="cfgAutoStopStatus" class="hint"></p>
+
+      <div class="field field-inline" style="margin-top:14px;">
         <input type="checkbox" id="cfgAutoRestart" ${server.autoRestart ? 'checked' : ''} />
         <label for="cfgAutoRestart">Reiniciar automáticamente si el servidor se cae solo</label>
       </div>
@@ -1057,6 +1122,22 @@ async function renderConfig(server) {
       showNotice(`No se pudo guardar la preferencia de JVM: ${error.message}`);
     }
   });
+
+  const saveAutoStop = async () => {
+    const line = document.getElementById('cfgAutoStopStatus');
+    try {
+      const saved = await window.api.updateAutoStop(
+        server.id,
+        document.getElementById('cfgAutoStop').checked,
+        Number(document.getElementById('cfgAutoStopMinutes').value)
+      );
+      line.textContent = saved.enabled ? `Guardado: se apagará tras ${saved.minutes} min sin jugadores.` : 'Guardado: el apagado automático está desactivado.';
+    } catch (error) {
+      line.textContent = error.message;
+    }
+  };
+  document.getElementById('cfgAutoStop').addEventListener('change', saveAutoStop);
+  document.getElementById('cfgAutoStopMinutes').addEventListener('change', saveAutoStop);
 
   document.getElementById('cfgAutoRestart').addEventListener('change', async (e) => {
     try {
@@ -1505,7 +1586,11 @@ async function sendConsoleCommand() {
 async function onStart() {
   try {
     state.usageHistory.set(state.selectedId, []);
-    await window.api.startServer(state.selectedId);
+    const result = await window.api.startServer(state.selectedId);
+    // En Inicio la propia tarjeta ya lo explica; el aviso es para las demás pestañas.
+    if (result && result.queued && state.currentTab !== 'home') {
+      showNotice(`El PC no tiene memoria libre ahora mismo. Tu servidor está en la cola (posición ${result.position}) y se encenderá solo en cuanto se apague otro.`);
+    }
     const server = await window.api.getServer(state.selectedId);
     await refreshStatus(server);
     renderPlayers([]);

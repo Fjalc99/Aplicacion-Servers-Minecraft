@@ -38,7 +38,63 @@ function lanIpv4() {
  * (arg, ctx), donde arg es el mismo único argumento que manda la interfaz y
  * ctx.reply(channel, payload) envía progreso a quien hizo la petición.
  */
-function createAppCore({ send, notify }) {
+const AUTO_STOP_DEFAULT_MINUTES = 10;
+const AUTO_STOP_MAX_MINUTES = 240;
+
+/** Apagado automático de un servidor: activado por defecto a los 10 minutos. */
+function autoStopConfig(server) {
+  const config = (server && server.autoStop) || {};
+  return {
+    enabled: config.enabled !== false,
+    minutes: Number(config.minutes) || AUTO_STOP_DEFAULT_MINUTES,
+  };
+}
+
+/**
+ * minuteMs solo existe para los tests (para no esperar minutos de verdad).
+ */
+function createAppCore({ send, notify, minuteMs = 60 * 1000 }) {
+  // ---------------------------------------------------------------------------
+  // Apagado automático sin jugadores
+  // ---------------------------------------------------------------------------
+  // serverId -> { timer, at }: cuenta atrás en marcha para apagar un servidor vacío
+  const idleStops = new Map();
+
+  function cancelIdleStop(serverId) {
+    const pending = idleStops.get(serverId);
+    if (pending) clearTimeout(pending.timer);
+    idleStops.delete(serverId);
+  }
+
+  /**
+   * Revisa si un servidor en marcha debe empezar (o dejar) la cuenta atrás:
+   * solo cuenta cuando ya está "en línea" (ha cargado del todo) y no hay nadie.
+   */
+  function evaluateIdleStop(serverId) {
+    const server = store.getServer(serverId);
+    const status = javaProcess.getStatus(serverId);
+    const config = autoStopConfig(server);
+    const shouldCount = server && config.enabled && status.state === 'online' && status.players.length === 0;
+
+    if (!shouldCount) {
+      cancelIdleStop(serverId);
+      return;
+    }
+    if (idleStops.has(serverId)) return; // ya está contando
+
+    const delay = config.minutes * minuteMs;
+    const timer = setTimeout(() => {
+      idleStops.delete(serverId);
+      const now = javaProcess.getStatus(serverId);
+      if (now.state !== 'online' || now.players.length > 0) return;
+      send(`servers:log:${serverId}`, `\n[Apagado automático: nadie se ha conectado en ${config.minutes} min]\n`);
+      notify('Servidor apagado por inactividad', `"${server.name}" se ha apagado porque no había nadie jugando.`, serverId);
+      javaProcess.stopServer(serverId, { force: false });
+    }, delay);
+    if (timer.unref) timer.unref();
+    idleStops.set(serverId, { timer, at: Date.now() + delay });
+  }
+
   // serverId -> intervalId, para las copias de seguridad automáticas "cada X horas"
   const autoBackupIntervals = new Map();
 
@@ -80,11 +136,14 @@ function createAppCore({ send, notify }) {
       },
       onReady: () => {
         notify('Servidor iniciado', `"${server.name}" ya está listo para jugar.`, server.id);
+        evaluateIdleStop(server.id);
       },
       onPlayersChange: (players) => {
         send(`servers:players:${server.id}`, players);
+        evaluateIdleStop(server.id);
       },
       onExit: async ({ code, crashed, recentLogText }) => {
+        cancelIdleStop(server.id);
         stopAutoBackupInterval(server.id);
 
         const diagnosis = crashed ? crashDiagnostics.diagnose(recentLogText) : null;
@@ -233,7 +292,26 @@ function createAppCore({ send, notify }) {
         maxPlayers: Number(props['max-players']) || 20,
         port: Number(props['server-port']) || 25565,
         joinAddress: server.joinAddress || null,
+        autoStop: autoStopConfig(server),
+        autoStopAt: idleStops.has(id) ? idleStops.get(id).at : null,
+        // Hora de este PC: la interfaz la usa para corregir si el reloj del
+        // navegador (p. ej. el móvil de un amigo) va adelantado o atrasado.
+        now: Date.now(),
       };
+    },
+
+    'servers:updateAutoStop': ({ id, enabled, minutes }) => {
+      const server = requireServer(id);
+      const value = Number(minutes);
+      if (!Number.isInteger(value) || value < 1 || value > AUTO_STOP_MAX_MINUTES) {
+        throw new Error(`Los minutos tienen que estar entre 1 y ${AUTO_STOP_MAX_MINUTES}.`);
+      }
+      server.autoStop = { enabled: Boolean(enabled), minutes: value };
+      store.saveServer(server);
+      // Si está en marcha, se reinicia la cuenta atrás con el ajuste nuevo.
+      cancelIdleStop(id);
+      if (javaProcess.isRunning(id)) evaluateIdleStop(id);
+      return autoStopConfig(server);
     },
 
     // Dirección propia de este servidor (la de su túnel de playit.gg). Vacía = la general.
@@ -355,4 +433,4 @@ function createAppCore({ send, notify }) {
   return { handlers, launchServer, buildModsZip };
 }
 
-module.exports = { createAppCore };
+module.exports = { createAppCore, autoStopConfig };

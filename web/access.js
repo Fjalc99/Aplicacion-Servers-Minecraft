@@ -71,6 +71,8 @@ const OWNER_CHANNELS = new Set([
   'servers:updateOptimizeJvm',
   'servers:updateAutoRestart',
   'servers:updateAutoBackup',
+  'servers:updateAutoStop',
+  'servers:leaveQueue',
   'servers:applyPerformancePreset',
 ]);
 
@@ -160,6 +162,8 @@ function checkRamBudget(server, ctx) {
  *
  * ctx: { allServers: Server[], isRunning(id), totalMemMb? (para tests) }
  * Devuelve { ok: true, arg } (arg puede venir saneado) o { ok: false, status, error }.
+ * Si el único problema es que no queda memoria libre, además code: 'ram' (la web
+ * lo usa para poner el arranque en cola en vez de rechazarlo).
  */
 function authorize(user, channel, arg, ctx) {
   const deny = (error, status = 403) => ({ ok: false, status, error });
@@ -211,7 +215,7 @@ function authorize(user, channel, arg, ctx) {
     if (reason) return deny(reason);
     if (channel === 'servers:start') {
       const ramError = checkRamBudget(server, ctx);
-      if (ramError) return deny(ramError);
+      if (ramError) return { ...deny(ramError), code: 'ram' };
     }
     return { ok: true, arg };
   }
@@ -240,7 +244,7 @@ function authorize(user, channel, arg, ctx) {
       return deny(`Solo puedes tener ${lim.maxRunning} servidor(es) tuyo(s) encendido(s) a la vez. Apaga "${myRunning[0].name}" primero.`);
     }
     const ramError = checkRamBudget(server, ctx);
-    if (ramError) return deny(ramError);
+    if (ramError) return { ...deny(ramError), code: 'ram' };
   }
 
   return { ok: true, arg };

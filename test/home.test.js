@@ -39,6 +39,7 @@ test('servers:status junta estado, jugadores máximos y puerto', () => {
   assert.equal(status.state, 'offline');
   assert.equal(status.maxPlayers, 8);
   assert.equal(status.port, 25570);
+  assert.ok(Math.abs(status.now - Date.now()) < 1000, 'incluye la hora del PC servidor para el reloj');
   assert.throws(() => core.handlers['servers:status']('no-existe'), /no encontrado/i);
 });
 

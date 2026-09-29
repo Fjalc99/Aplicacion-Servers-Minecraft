@@ -40,6 +40,7 @@ const FRIEND_CHANNELS = new Set([
   'servers:start',
   'servers:stop',
   'servers:createBackup',
+  'servers:leaveQueue',
 ]);
 
 // ---------------------------------------------------------------------------
