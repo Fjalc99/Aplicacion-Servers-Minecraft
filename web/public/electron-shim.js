@@ -109,7 +109,7 @@
   const FOLDER_PROMPTS = {
     'servers:pickImportFolder': 'Ruta completa de la carpeta del servidor existente:',
     'worlds:pickFolder': 'Ruta completa de la carpeta del mundo (la que contiene level.dat):',
-    'mods:pickFolder': 'Ruta completa de la carpeta de mods del cliente:',
+    'mods:pickFolder': 'Ruta completa de la carpeta de mods (la de tu Minecraft o la del servidor):',
   };
 
   function pickFolderInBrowser(channel) {

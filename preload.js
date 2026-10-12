@@ -90,7 +90,13 @@ contextBridge.exposeInMainWorld('api', {
 
   // Mods
   pickModsFolder: () => ipcRenderer.invoke('mods:pickFolder'),
+  getCurseForge: () => ipcRenderer.invoke('app:getCurseForge'),
+  setCurseForge: (apiKey) => ipcRenderer.invoke('app:setCurseForge', apiKey),
+  removeCurseForge: () => ipcRenderer.invoke('app:removeCurseForge'),
   analyzeMods: (folder, serverId) => ipcRenderer.invoke('mods:analyze', { folder, serverId }),
+  compareClientMods: (folder, serverId) => ipcRenderer.invoke('mods:compareClient', { folder, serverId }),
+  applyClientSync: (folder, serverId, changes) =>
+    ipcRenderer.invoke('mods:applyClientSync', { folder, serverId, ...changes }),
   applyMods: (serverId, results, includeUnknown) =>
     ipcRenderer.invoke('mods:apply', { serverId, results, includeUnknown }),
   exportModsZip: (serverId, results) =>

@@ -330,6 +330,22 @@ function readEntryData(fd, entry) {
 }
 
 /**
+ * Lee un único archivo de dentro de un ZIP/JAR (p. ej. META-INF/mods.toml de un
+ * mod) sin extraer nada. Devuelve un Buffer, o null si no existe.
+ */
+function readZipEntry(zipPath, entryName) {
+  const fd = fs.openSync(zipPath, 'r');
+  try {
+    const entry = readCentralDirectory(fd).find((e) => e.name === entryName);
+    if (!entry || (entry.method !== 0 && entry.method !== 8)) return null;
+    const raw = readEntryData(fd, entry);
+    return entry.method === 8 ? zlib.inflateRawSync(raw) : raw;
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+/**
  * Extrae un .zip estándar (nuestro o de cualquier otro origen) dentro de destDir,
  * recreando la estructura de carpetas. Se niega a escribir fuera de destDir.
  */
@@ -419,4 +435,4 @@ async function createZipFromDirectory(dirPath, outputPath, baseName, onProgress)
   return createZip(entries, outputPath, onProgress);
 }
 
-module.exports = { createZip, extractZip, extractZipAsync, readZipEntries, createZipFromDirectory, listDirectoryEntries };
+module.exports = { createZip, extractZip, extractZipAsync, readZipEntries, readZipEntry, createZipFromDirectory, listDirectoryEntries };

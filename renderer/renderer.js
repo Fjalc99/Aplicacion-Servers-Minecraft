@@ -500,12 +500,14 @@ async function renderSettings() {
   let duck = { configured: false };
   let playitStatus = { running: false };
   let servers = [];
+  let cf = { configured: false };
   try {
-    [info, duck, playitStatus, servers] = await Promise.all([
+    [info, duck, playitStatus, servers, cf] = await Promise.all([
       window.api.getConnectionInfo(),
       window.api.getDuckDns(),
       window.api.getPlayitStatus().catch(() => ({ running: false })),
       window.api.listServers(),
+      window.api.getCurseForge().catch(() => ({ configured: false })),
     ]);
   } catch (error) {
     el.innerHTML = `<p class="error-text">${escapeHtml(error.message)}</p>`;
@@ -562,6 +564,19 @@ async function renderSettings() {
 
     ${IS_WEB ? '<div class="card" id="usersCard"><h3>Usuarios</h3><p class="hint">Cargando…</p></div>' : ''}
 
+    <div class="card">
+      <h3>Analizar mods: CurseForge</h3>
+      <p class="hint" style="margin-top:0;">Los mods se buscan primero en Modrinth (no necesita nada). Para buscar también en CurseForge los que no están en Modrinth, hace falta una clave de API gratuita: entra en <strong>console.curseforge.com</strong>, inicia sesión, ve a <strong>API keys</strong> y cópiala aquí. Se guarda solo en este PC y no se muestra nunca.</p>
+      <div class="settings-actions">
+        <input type="password" id="cfKey" aria-label="Clave de API de CurseForge" autocomplete="off" placeholder="${cf.configured ? `Clave guardada (${escapeHtml(cf.keyHint || '')}); pega otra para cambiarla` : 'Pega aquí tu clave de API de CurseForge'}" />
+        <button id="cfSave" type="button" class="btn btn-ghost">Guardar y comprobar</button>
+        ${cf.configured && cf.source === 'settings' ? '<button id="cfRemove" type="button" class="btn btn-ghost">Quitar clave</button>' : ''}
+      </div>
+      <p id="cfStatus" class="settings-line">${cf.configured
+        ? '<span class="settings-status good">✓ CurseForge activado: se usará al analizar mods.</span>'
+        : '<span class="hint">Sin configurar: solo se busca en Modrinth y en la ficha de cada .jar.</span>'}</p>
+    </div>
+
     <details class="card settings-alt">
       <summary><h3>Alternativa: abrir puertos en el router + DuckDNS</h3></summary>
       <p class="hint">Si prefieres no usar playit: reenvía en el router el puerto 25565 (y 25566–25599 para servidores de amigos) y usa DuckDNS para dar un nombre en vez de tu IP. Ojo: con este método tu IP sí se puede averiguar.</p>
@@ -603,6 +618,33 @@ async function renderSettings() {
     } catch (error) {
       line.innerHTML = `<span class="settings-status bad">✕ ${escapeHtml(error.message)}</span>`;
     }
+  });
+
+  // ---- CurseForge
+  const cfStatus = document.getElementById('cfStatus');
+  document.getElementById('cfSave').addEventListener('click', async (event) => {
+    const value = document.getElementById('cfKey').value.trim();
+    if (!value) {
+      cfStatus.innerHTML = '<span class="settings-status bad">✕ Pega primero la clave.</span>';
+      return;
+    }
+    event.target.disabled = true;
+    cfStatus.innerHTML = '<span class="hint">Comprobando con CurseForge…</span>';
+    try {
+      await window.api.setCurseForge(value);
+      renderSettings();
+    } catch (error) {
+      // En la app de escritorio el error llega como "Error invoking remote method '...': Error: <mensaje>"
+      const message = String(error.message).replace(/^Error invoking remote method '[^']+': (?:Error: )?/, '');
+      cfStatus.innerHTML = `<span class="settings-status bad">✕ ${escapeHtml(message)}</span>`;
+      event.target.disabled = false;
+    }
+  });
+  const cfRemove = document.getElementById('cfRemove');
+  if (cfRemove) cfRemove.addEventListener('click', async () => {
+    if (!confirm('¿Quitar la clave de CurseForge?')) return;
+    await window.api.removeCurseForge();
+    renderSettings();
   });
 
   // ---- DuckDNS (alternativa)
@@ -1295,14 +1337,21 @@ async function renderConfig(server) {
 // ---------------------------------------------------------------------------
 
 let lastModAnalysis = [];
+let lastModAnalysisInfo = {};
 
 function renderMods(server) {
   const el = document.getElementById('tab-mods');
   const isVanilla = server.loader === 'vanilla';
   el.innerHTML = `
     ${isVanilla ? '<p class="hint">Este servidor es Vanilla: no admite mods. Puedes usarlo con datapacks manualmente.</p>' : ''}
+    <p class="hint" style="margin-top:0;">
+      <strong>Preparar el servidor</strong>: elige una carpeta <code>mods</code> (la de tu Minecraft o la del propio servidor) y te digo cuáles van en el servidor y cuáles son solo de cliente.<br>
+      <strong>Comparar mi cliente</strong>: elige la carpeta <code>mods</code> de tu Minecraft (o la de un amigo) y te digo qué le falta, qué le sobra y qué tiene en otra versión para poder entrar a este servidor.<br>
+      Cada mod se busca en Modrinth, luego en CurseForge y, si no, en la ficha del propio .jar.
+    </p>
     <div class="mods-toolbar">
-      <button id="pickModsBtn" class="btn btn-accent" ${isVanilla ? 'disabled' : ''}>Elegir carpeta de mods del cliente</button>
+      <button id="pickModsBtn" class="btn btn-accent" ${isVanilla ? 'disabled' : ''}>Preparar el servidor</button>
+      <button id="compareClientBtn" class="btn btn-ghost" ${isVanilla ? 'disabled' : ''}>Comparar mi cliente con este servidor</button>
       <span id="modsFolderLabel" class="hint"></span>
     </div>
     <div id="modsResult"></div>
@@ -1312,15 +1361,246 @@ function renderMods(server) {
   document.getElementById('pickModsBtn').addEventListener('click', async () => {
     const folder = await window.api.pickModsFolder();
     if (!folder) return;
+    const btn = document.getElementById('pickModsBtn');
+    const resultEl = document.getElementById('modsResult');
     document.getElementById('modsFolderLabel').textContent = folder;
-    document.getElementById('modsResult').innerHTML = '<p class="hint">Analizando mods contra Modrinth…</p>';
-    const res = await window.api.analyzeMods(folder, server.id);
+    resultEl.innerHTML = '<p class="hint">Analizando mods en Modrinth y CurseForge… (con muchos mods puede tardar un poco)</p>';
+    btn.disabled = true;
+    try {
+      const res = await window.api.analyzeMods(folder, server.id);
+      if (!res.ok) {
+        resultEl.innerHTML = `<p class="error-text">${escapeHtml(res.error)}</p>`;
+        return;
+      }
+      lastModAnalysis = res.results;
+      lastModAnalysisInfo = res;
+      renderModsTable(server);
+    } catch (error) {
+      resultEl.innerHTML = `<p class="error-text">${escapeHtml(error.message)}</p>`;
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  document.getElementById('compareClientBtn').addEventListener('click', async () => {
+    const folder = await window.api.pickModsFolder();
+    if (!folder) return;
+    await runClientCompare(server, folder);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Comparar un cliente con el servidor
+// ---------------------------------------------------------------------------
+
+let lastClientCompare = null;
+
+async function runClientCompare(server, folder) {
+  const resultEl = document.getElementById('modsResult');
+  const buttons = [document.getElementById('pickModsBtn'), document.getElementById('compareClientBtn')];
+  document.getElementById('modsFolderLabel').textContent = folder;
+  resultEl.innerHTML = '<p class="hint">Comparando los mods de tu cliente con los del servidor… (con muchos mods puede tardar un poco)</p>';
+  buttons.forEach((b) => (b.disabled = true));
+  try {
+    const res = await window.api.compareClientMods(folder, server.id);
     if (!res.ok) {
-      document.getElementById('modsResult').innerHTML = `<p class="error-text">${escapeHtml(res.error)}</p>`;
+      resultEl.innerHTML = `<p class="error-text">${escapeHtml(res.error)}</p>`;
       return;
     }
-    lastModAnalysis = res.results;
-    renderModsTable(server);
+    lastClientCompare = { ...res, folder };
+    renderClientCompare(server);
+  } catch (error) {
+    resultEl.innerHTML = `<p class="error-text">${escapeHtml(error.message)}</p>`;
+  } finally {
+    buttons.forEach((b) => (b.disabled = false));
+  }
+}
+
+function modLinks(m) {
+  const out = [];
+  if (m.modrinthUrl) out.push(`<a href="${escapeHtml(m.modrinthUrl)}" target="_blank" rel="noopener">Modrinth</a>`);
+  if (m.curseforgeUrl) out.push(`<a href="${escapeHtml(m.curseforgeUrl)}" target="_blank" rel="noopener">CurseForge</a>`);
+  return out.join(' · ') || '—';
+}
+
+function modCell(m) {
+  return `${escapeHtml(m.name)}${m.name !== m.fileName ? `<br><span class="hint mod-file">${escapeHtml(m.fileName)}</span>` : ''}`;
+}
+
+function renderClientCompare(server) {
+  const container = document.getElementById('modsResult');
+  const r = lastClientCompare;
+  const needBadge = {
+    required: '<span class="badge badge-needed">Necesario</span>',
+    optional: '<span class="badge">Opcional</span>',
+    unknown: '<span class="badge badge-unknown" title="No se sabe si hace falta en el cliente; la mayoría de mods de contenido sí">Revisar</span>',
+  };
+
+  const section = ({ key, title, intro, rows, head, checkedByDefault = true, cls }) => {
+    if (rows.length === 0) return '';
+    return `
+      <h3 style="margin-top:22px;">${title} (${rows.length})</h3>
+      ${intro ? `<p class="hint" style="margin-top:0;">${intro}</p>` : ''}
+      ${cls ? `
+      <div class="mods-select-bar">
+        <button type="button" class="btn btn-ghost btn-small" data-select-all="${cls}">Marcar todos</button>
+        <button type="button" class="btn btn-ghost btn-small" data-select-none="${cls}">Desmarcar todos</button>
+        <span class="hint" data-count="${cls}"></span>
+      </div>` : ''}
+      <table class="mods-table" data-section="${key}">
+        <thead><tr>${cls ? '<th></th>' : ''}${head}</tr></thead>
+        <tbody>${rows.map((row, i) => `<tr>${cls ? `<td><input type="checkbox" class="${cls}" data-i="${i}" ${(typeof checkedByDefault === 'function' ? checkedByDefault(row) : checkedByDefault) ? 'checked' : ''} /></td>` : ''}${row.cells}</tr>`).join('')}</tbody>
+      </table>`;
+  };
+
+  const notes = [];
+  if ((r.warnings || []).includes('curseforge-sin-clave')) {
+    notes.push('<p class="hint mods-note">Sin clave de CurseForge, los mods que solo están allí salen como "Revisar". Puedes ponerla en <a href="#" id="modsOpenSettings">Ajustes</a>.</p>');
+  }
+  for (const w of (r.warnings || []).filter((w) => w !== 'curseforge-sin-clave')) {
+    notes.push(`<p class="error-text mods-note">${escapeHtml(w)}</p>`);
+  }
+
+  const problems = r.missing.filter((m) => m.need !== 'optional').length + r.different.length + r.serverOnly.length + r.notOnServer.length;
+  const summary = problems === 0
+    ? '<p class="settings-status good">✓ Tu cliente coincide con el servidor: puedes entrar a jugar.</p>'
+    : `<p class="hint">${r.same.length} iguales · <strong>${r.missing.length}</strong> faltan · <strong>${r.different.length}</strong> en otra versión · <strong>${r.serverOnly.length}</strong> solo de servidor · <strong>${r.notOnServer.length}</strong> no están en el servidor · ${r.clientOnly.length} solo de cliente</p>`;
+
+  container.innerHTML = `
+    ${notes.join('')}
+    ${summary}
+    ${section({
+      key: 'missing', cls: 'syncMissing', title: 'Te faltan (el servidor los tiene)',
+      intro: 'Sin los "Necesario" no podrás entrar. Los "Opcional" no hacen falta. Los "Revisar" no se sabe seguro: casi siempre hacen falta.',
+      head: '<th>Mod</th><th>En el cliente</th><th></th>',
+      checkedByDefault: (row) => row.m.need !== 'optional',
+      rows: r.missing.map((m) => ({ m, cells: `<td>${modCell(m)}</td><td>${needBadge[m.need] || ''}</td><td>${modLinks(m)}</td>` })),
+    })}
+    ${section({
+      key: 'different', cls: 'syncReplace', title: 'En otra versión que el servidor',
+      intro: 'Se cambia tu versión por la del servidor (la tuya se aparta, no se borra).',
+      head: '<th>Mod</th><th>Tú tienes</th><th>El servidor tiene</th>',
+      rows: r.different.map((m) => ({ m, cells: `<td>${escapeHtml(m.name)}</td><td class="mod-file">${escapeHtml(m.fileName)}</td><td class="mod-file">${escapeHtml(m.server.fileName)}</td>` })),
+    })}
+    ${section({
+      key: 'serverOnly', cls: 'syncRemove', title: 'Solo de servidor (te sobran)',
+      intro: 'Estos mods solo funcionan en el servidor; en tu Minecraft no hacen nada o dan error.',
+      head: '<th>Mod</th><th></th>',
+      rows: r.serverOnly.map((m) => ({ m, cells: `<td>${modCell(m)}</td><td>${modLinks(m)}</td>` })),
+    })}
+    ${section({
+      key: 'notOnServer', cls: 'syncExtra', title: 'Los tienes tú, pero el servidor no',
+      intro: 'Si son mods de contenido (bloques, objetos, criaturas), el servidor te echará al entrar: quítalos o añádelos al servidor. Si son de interfaz o rendimiento, no pasa nada. Por eso salen desmarcados.',
+      head: '<th>Mod</th><th></th>',
+      checkedByDefault: false,
+      rows: r.notOnServer.map((m) => ({ m, cells: `<td>${modCell(m)}</td><td>${modLinks(m)}</td>` })),
+    })}
+    ${section({
+      key: 'clientOnly', title: 'Solo de cliente (están bien)',
+      intro: 'Mods de gráficos, interfaz, minimapa… No van en el servidor y no molestan para entrar.',
+      head: '<th>Mod</th><th></th>',
+      rows: r.clientOnly.map((m) => ({ m, cells: `<td>${modCell(m)}</td><td>${modLinks(m)}</td>` })),
+    })}
+
+    <div style="display:flex; gap:10px; flex-wrap:wrap; margin-top:18px;">
+      ${problems > 0 || r.missing.length > 0 ? '<button id="applyClientSyncBtn" class="btn btn-accent">Arreglar mi cliente con lo marcado</button>' : ''}
+      <button id="clientPackZipBtn" class="btn btn-ghost">ZIP con los mods que necesita un cliente (para tus amigos)</button>
+    </div>
+    <div id="clientSyncResult" class="hint" style="margin-top:14px;"></div>
+  `;
+
+  const settingsLink = document.getElementById('modsOpenSettings');
+  if (settingsLink) settingsLink.addEventListener('click', (event) => { event.preventDefault(); openSettings(); });
+
+  const updateCount = (cls) => {
+    const boxes = [...container.querySelectorAll(`.${cls}`)];
+    const label = container.querySelector(`[data-count="${cls}"]`);
+    if (label) label.textContent = `${boxes.filter((b) => b.checked).length} de ${boxes.length} marcados`;
+  };
+  for (const cls of ['syncMissing', 'syncReplace', 'syncRemove', 'syncExtra']) {
+    container.querySelectorAll(`.${cls}`).forEach((box) => box.addEventListener('change', () => updateCount(cls)));
+    updateCount(cls);
+  }
+  container.querySelectorAll('[data-select-all], [data-select-none]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const cls = btn.dataset.selectAll || btn.dataset.selectNone;
+      container.querySelectorAll(`.${cls}`).forEach((box) => { box.checked = Boolean(btn.dataset.selectAll); });
+      updateCount(cls);
+    });
+  });
+
+  const checked = (cls, list) => [...container.querySelectorAll(`.${cls}`)].filter((b) => b.checked).map((b) => list[Number(b.dataset.i)]);
+  const out = document.getElementById('clientSyncResult');
+
+  const applyBtn = document.getElementById('applyClientSyncBtn');
+  if (applyBtn) applyBtn.addEventListener('click', async () => {
+    const changes = {
+      copy: checked('syncMissing', r.missing).map((m) => m.fileName),
+      replace: checked('syncReplace', r.different).map((m) => ({ client: m.fileName, server: m.server.fileName })),
+      remove: [...checked('syncRemove', r.serverOnly), ...checked('syncExtra', r.notOnServer)].map((m) => m.fileName),
+    };
+    const total = changes.copy.length + changes.replace.length + changes.remove.length;
+    if (total === 0) {
+      out.innerHTML = '<span class="error-text">No hay nada marcado.</span>';
+      return;
+    }
+    const ok = confirm(
+      `En tu carpeta de mods del cliente:\n\n` +
+        `• Copiar del servidor: ${changes.copy.length}\n` +
+        `• Cambiar a la versión del servidor: ${changes.replace.length}\n` +
+        `• Quitar: ${changes.remove.length}\n\n` +
+        'Lo que se quita o se sustituye no se borra: se mueve a una carpeta "mods-quitados-<fecha>" junto a tu carpeta de mods.\n\n' +
+        'Cierra Minecraft antes de continuar. ¿Seguir?'
+    );
+    if (!ok) return;
+    applyBtn.disabled = true;
+    out.textContent = 'Aplicando…';
+    try {
+      const res = await window.api.applyClientSync(r.folder, server.id, changes);
+      if (!res.ok) {
+        out.innerHTML = `<span class="error-text">Error: ${escapeHtml(res.error)}</span>`;
+        return;
+      }
+      let html = `Hecho: ${res.copied.length} copiados · ${res.replaced.length} cambiados de versión · ${res.removed.length} quitados.`;
+      if (res.asideDir) html += `<br>Lo quitado está en <strong>${escapeHtml(res.asideDir)}</strong> por si necesitas recuperar algo.`;
+      if (res.failed.length) {
+        html += `<br><span class="error-text">No se pudieron tocar: ${res.failed.map((f) => `${escapeHtml(f.fileName)} (${escapeHtml(f.error)})`).join(', ')}. ¿Está Minecraft abierto o el antivirus bloqueando la carpeta?</span>`;
+      }
+      html += '<br><button id="recompareBtn" class="btn btn-ghost" style="margin-top:8px;">Volver a comparar</button>';
+      out.innerHTML = html;
+      document.getElementById('recompareBtn').addEventListener('click', () => runClientCompare(server, r.folder));
+    } catch (error) {
+      out.innerHTML = `<span class="error-text">Error: ${escapeHtml(error.message)}</span>`;
+    } finally {
+      applyBtn.disabled = false;
+    }
+  });
+
+  // Pack para amigos: todo lo del servidor que hace falta en un cliente
+  // (lo que ya tienes igual + lo que te falta + la versión del servidor de lo distinto).
+  document.getElementById('clientPackZipBtn').addEventListener('click', async () => {
+    const serverSideFiles = [
+      ...r.same.filter((m) => !r.serverOnly.some((s) => s.fileName === m.fileName)),
+      ...r.missing.filter((m) => m.need !== 'optional'),
+      ...r.different.map((m) => m.server),
+    ];
+    if (serverSideFiles.length === 0) {
+      out.innerHTML = '<span class="error-text">No hay mods que empaquetar.</span>';
+      return;
+    }
+    out.textContent = IS_WEB ? 'Preparando el ZIP…' : 'Elige dónde guardar el ZIP…';
+    const startTime = Date.now();
+    window.api.onModsExportProgress((info) => renderProgressBar(out, info, startTime));
+    try {
+      const result = await window.api.exportModsZip(server.id, serverSideFiles);
+      if (result.canceled) { out.textContent = ''; return; }
+      if (!result.ok) { out.innerHTML = `<span class="error-text">Error: ${escapeHtml(result.error)}</span>`; return; }
+      out.innerHTML = `ZIP creado con ${result.count} mods (${(result.size / 1024 / 1024).toFixed(1)} MB). Tus amigos lo descomprimen dentro de su carpeta <code>mods</code> (vacía, o con solo sus mods de gráficos/interfaz).`;
+    } catch (error) {
+      out.innerHTML = `<span class="error-text">Error: ${escapeHtml(error.message)}</span>`;
+    } finally {
+      window.api.removeModsExportProgressListeners();
+    }
   });
 }
 
@@ -1330,10 +1610,16 @@ function renderModsTable(server) {
     container.innerHTML = '<p class="hint">No se han encontrado archivos .jar en esa carpeta.</p>';
     return;
   }
+  const info = lastModAnalysisInfo || {};
+  const isServerFolder = Boolean(info.isServerModsFolder);
 
-  const badge = (status) => {
-    if (status === 'needed') return '<span class="badge badge-needed">Necesario en servidor</span>';
-    if (status === 'client-only') return '<span class="badge badge-client">Solo cliente</span>';
+  const sourceText = (m) =>
+    m.source === 'curseforge' ? ' (según CurseForge)' : m.source === 'jar' ? ' (según el propio mod)' : '';
+
+  const badge = (m) => {
+    if (m.status === 'needed') return `<span class="badge badge-needed" title="Necesario en servidor${sourceText(m)}">Necesario en servidor</span>`;
+    if (m.status === 'client-only') return `<span class="badge badge-client" title="Solo cliente${sourceText(m)}">Solo cliente</span>`;
+    if (m.curseforgeUrl) return '<span class="badge badge-unknown" title="Está en CurseForge, pero su autor no indica si va en cliente o servidor">Lado sin indicar</span>';
     return '<span class="badge badge-unknown">No identificado</span>';
   };
 
@@ -1344,50 +1630,87 @@ function renderModsTable(server) {
     return '';
   };
 
+  const links = (m) => {
+    const out = [];
+    if (m.modrinthUrl) out.push(`<a href="${escapeHtml(m.modrinthUrl)}" target="_blank" rel="noopener">Modrinth</a>`);
+    if (m.curseforgeUrl) out.push(`<a href="${escapeHtml(m.curseforgeUrl)}" target="_blank" rel="noopener">CurseForge</a>`);
+    return out.join(' · ') || '—';
+  };
+
   const row = (m, i, checkClass) => {
-    // Si ya sabemos que en el servidor está exactamente igual, no hace falta
-    // volver a copiarlo: se desmarca por defecto (el usuario puede marcarlo si quiere).
-    const defaultChecked = m.serverState !== 'same';
+    // Todos salen marcados: los que ya están iguales en el servidor también (para
+    // el ZIP hacen falta). Al copiar, esos se saltan solos sin volver a escribirlos.
+    // Solo se desmarcan las versiones sobrantes de un mod repetido.
     return `
       <tr>
-        <td><input type="checkbox" class="${checkClass}" data-i="${i}" ${defaultChecked ? 'checked' : ''} /></td>
-        <td>${escapeHtml(m.name)}</td>
-        <td>${badge(m.status)}</td>
-        <td>${serverStateBadge(m.serverState)}</td>
-        <td>${m.modrinthUrl ? `<a href="${m.modrinthUrl}" target="_blank">Modrinth</a>` : '—'}</td>
+        <td><input type="checkbox" class="${checkClass}" data-i="${i}" ${m.duplicateOf && !m.keepDuplicate ? '' : 'checked'} /></td>
+        <td>${escapeHtml(m.name)}${m.name !== m.fileName ? `<br><span class="hint mod-file">${escapeHtml(m.fileName)}</span>` : ''}${m.duplicateOf
+          ? `<br><span class="badge badge-client" title="Otra versión del mismo mod: ${escapeHtml(m.duplicateOf.join(', '))}">${m.keepDuplicate ? 'Duplicado: se deja este' : 'Duplicado: desmarcado'}</span>`
+          : ''}</td>
+        <td>${badge(m)}</td>
+        ${isServerFolder ? '' : `<td>${serverStateBadge(m.serverState)}</td>`}
+        <td>${links(m)}</td>
       </tr>`;
   };
 
-  const serverRows = lastModAnalysis
-    .map((m, i) => ({ m, i }))
-    .filter(({ m }) => m.status !== 'client-only')
-    .map(({ m, i }) => row(m, i, 'modCheckServer'))
-    .join('');
+  const indexed = lastModAnalysis.map((m, i) => ({ m, i }));
+  const serverList = indexed.filter(({ m }) => m.status !== 'client-only');
+  const clientList = indexed.filter(({ m }) => m.status === 'client-only');
+  const serverRows = serverList.map(({ m, i }) => row(m, i, 'modCheckServer')).join('');
+  const clientRows = clientList.map(({ m, i }) => row(m, i, 'modCheckClient')).join('');
+  const head = (first) =>
+    `<thead><tr><th>${first}</th><th>Mod</th><th>Estado</th>${isServerFolder ? '' : '<th>En el servidor</th>'}<th></th></tr></thead>`;
+  const selectBar = (cls) => `
+    <div class="mods-select-bar">
+      <button type="button" class="btn btn-ghost btn-small" data-select-all="${cls}">Marcar todos</button>
+      <button type="button" class="btn btn-ghost btn-small" data-select-none="${cls}">Desmarcar todos</button>
+      <span class="hint" data-count="${cls}"></span>
+    </div>`;
 
-  const clientRows = lastModAnalysis
-    .map((m, i) => ({ m, i }))
-    .filter(({ m }) => m.status === 'client-only')
-    .map(({ m, i }) => row(m, i, 'modCheckClient'))
-    .join('');
+  // Avisos: CurseForge sin clave, fallos de conexión, carpeta del propio servidor...
+  const notes = [];
+  const unknownCount = lastModAnalysis.filter((m) => m.status === 'unknown').length;
+  for (const w of info.warnings || []) {
+    if (w === 'curseforge-sin-clave') {
+      notes.push(`<p class="hint mods-note">Hay mods que no están en Modrinth. Para buscarlos también en CurseForge, pon tu clave de API de CurseForge en <a href="#" id="modsOpenSettings">Ajustes</a>.</p>`);
+    } else {
+      notes.push(`<p class="error-text mods-note">${escapeHtml(w)}</p>`);
+    }
+  }
+  if (isServerFolder) {
+    notes.push('<p class="hint mods-note">Estás analizando la carpeta <code>mods</code> del propio servidor. Aquí lo útil es ver qué mods son <strong>solo de cliente</strong> (sobran en el servidor y a veces lo hacen fallar) y generar los ZIP.</p>');
+  }
+  const dupes = lastModAnalysis.filter((m) => m.duplicateOf && !m.keepDuplicate);
+  if (dupes.length > 0) {
+    notes.push(`<p class="error-text mods-note">Hay mods repetidos en varias versiones (el servidor no arranca con dos versiones del mismo mod). He dejado marcada una de cada y desmarcado: ${dupes.map((m) => escapeHtml(m.fileName)).join(', ')}. Revísalo y, si sobran, bórralos también de la carpeta.</p>`);
+  }
+  if (unknownCount > 0) {
+    notes.push(`<p class="hint mods-note">${unknownCount} mod(s) sin dato claro de cliente/servidor: van en la lista del servidor por si acaso. Revísalos con el enlace si tienes dudas.</p>`);
+  }
 
   container.innerHTML = `
-    <h3 style="margin-top:0;">Mods para el servidor (${serverRows ? serverRows.split('<tr>').length - 1 : 0})</h3>
+    ${notes.join('')}
+    <h3 style="margin-top:14px;">Mods para el servidor (${serverList.length})</h3>
     ${serverRows ? `
+    ${selectBar('modCheckServer')}
     <table class="mods-table">
-      <thead><tr><th>Copiar</th><th>Mod</th><th>Estado</th><th>En el servidor</th><th></th></tr></thead>
+      ${head(isServerFolder ? 'Incluir' : 'Copiar')}
       <tbody>${serverRows}</tbody>
     </table>
     <div style="display:flex; gap:10px; flex-wrap:wrap; margin-top:14px;">
-      <button id="applyModsBtn" class="btn btn-accent">Copiar seleccionados a la carpeta mods del servidor</button>
-      <button id="exportServerZipBtn" class="btn btn-ghost">Generar ZIP con los seleccionados</button>
+      ${isServerFolder ? '' : '<button id="applyModsBtn" class="btn btn-accent">Copiar seleccionados a la carpeta mods del servidor</button>'}
+      <button id="exportServerZipBtn" class="btn ${isServerFolder ? 'btn-accent' : 'btn-ghost'}">Generar ZIP con los seleccionados</button>
     </div>
     ` : '<p class="hint">Ninguno de los mods analizados hace falta en el servidor.</p>'}
 
-    <h3 style="margin-top:26px;">Mods solo de cliente (${clientRows ? clientRows.split('<tr>').length - 1 : 0})</h3>
+    <h3 style="margin-top:26px;">Mods solo de cliente (${clientList.length})</h3>
     ${clientRows ? `
-    <p class="hint" style="margin-top:0;">Estos mods no van al servidor (son de interfaz/gráficos/etc. y el servidor los rechazaría o los ignoraría). Aquí los tienes aparte por si quieres, por ejemplo, generar el pack de cliente para tus amigos.</p>
+    <p class="hint" style="margin-top:0;">${isServerFolder
+      ? 'Estos mods están en la carpeta del servidor pero son solo de cliente: puedes quitarlos de ahí. Si quieres, genera antes un ZIP con ellos para el pack de tus amigos.'
+      : 'Estos mods no van al servidor (son de interfaz/gráficos/etc. y el servidor los rechazaría o los ignoraría). Aquí los tienes aparte por si quieres, por ejemplo, generar el pack de cliente para tus amigos.'}</p>
+    ${selectBar('modCheckClient')}
     <table class="mods-table">
-      <thead><tr><th>Incluir</th><th>Mod</th><th>Estado</th><th>En el servidor</th><th></th></tr></thead>
+      ${head('Incluir')}
       <tbody>${clientRows}</tbody>
     </table>
     <div style="display:flex; gap:10px; flex-wrap:wrap; margin-top:14px;">
@@ -1398,12 +1721,38 @@ function renderModsTable(server) {
     <div id="applyModsResult" class="hint" style="margin-top:14px;"></div>
   `;
 
+  const settingsLink = document.getElementById('modsOpenSettings');
+  if (settingsLink) settingsLink.addEventListener('click', (event) => { event.preventDefault(); openSettings(); });
+
+  // Marcar / desmarcar todos y contador de seleccionados
+  const updateCount = (cls) => {
+    const boxes = [...container.querySelectorAll(`.${cls}`)];
+    const label = container.querySelector(`[data-count="${cls}"]`);
+    if (label) label.textContent = `${boxes.filter((b) => b.checked).length} de ${boxes.length} marcados`;
+  };
+  for (const cls of ['modCheckServer', 'modCheckClient']) {
+    container.querySelectorAll(`.${cls}`).forEach((box) => box.addEventListener('change', () => updateCount(cls)));
+    updateCount(cls);
+  }
+  container.querySelectorAll('[data-select-all], [data-select-none]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const cls = btn.dataset.selectAll || btn.dataset.selectNone;
+      const value = Boolean(btn.dataset.selectAll);
+      container.querySelectorAll(`.${cls}`).forEach((box) => { box.checked = value; });
+      updateCount(cls);
+    });
+  });
+
   const applyModsBtn = document.getElementById('applyModsBtn');
   if (applyModsBtn) applyModsBtn.addEventListener('click', async () => {
     try {
       const checked = [...document.querySelectorAll('.modCheckServer')]
         .filter((c) => c.checked)
         .map((c) => lastModAnalysis[Number(c.dataset.i)]);
+      if (checked.length === 0) {
+        document.getElementById('applyModsResult').innerHTML = '<span class="error-text">No hay ningún mod marcado. Pulsa "Marcar todos".</span>';
+        return;
+      }
       const result = await window.api.applyMods(server.id, checked, true);
 
       if (!result.ok) {
@@ -1413,7 +1762,8 @@ function renderModsTable(server) {
 
       const parts = [
         `${result.copiedNew.length} nuevos`,
-        result.copiedOverwritten.length ? `${result.copiedOverwritten.length} ya existían (sobrescritos)` : null,
+        result.copiedOverwritten.length ? `${result.copiedOverwritten.length} actualizados` : null,
+        result.alreadySame && result.alreadySame.length ? `${result.alreadySame.length} ya estaban iguales` : null,
         result.skipped.length ? `${result.skipped.length} omitidos` : null,
         result.failed.length ? `${result.failed.length} fallaron` : null,
       ].filter(Boolean);
@@ -1422,8 +1772,8 @@ function renderModsTable(server) {
 
       if (result.failed.length) {
         html += `<br><span class="error-text">No se pudieron dejar en el servidor: ${result.failed.map((f) => escapeHtml(f.fileName)).join(', ')}. Si desaparecen justo después de copiarse, revisa que el antivirus no los esté bloqueando (algunos marcan los .jar de mods como sospechosos) y añade esa carpeta como excepción.</span>`;
-      } else if (result.copiedNew.length === 0 && result.copiedOverwritten.length > 0) {
-        html += `<br><span class="hint">Todos los seleccionados ya estaban en esa carpeta con el mismo nombre: por eso no ves cambios al abrirla.</span>`;
+      } else if (result.copiedNew.length === 0 && result.copiedOverwritten.length === 0) {
+        html += `<br><span class="hint">Todos los seleccionados ya estaban iguales en el servidor: no hacía falta copiar nada.</span>`;
       }
 
       document.getElementById('applyModsResult').innerHTML = html;
@@ -1441,11 +1791,11 @@ function renderModsTable(server) {
         .map((c) => lastModAnalysis[Number(c.dataset.i)]);
 
       if (checked.length === 0) {
-        resultEl.innerHTML = '<span class="error-text">No has seleccionado ningún mod.</span>';
+        resultEl.innerHTML = '<span class="error-text">No hay ningún mod marcado en esa lista. Pulsa "Marcar todos".</span>';
         return;
       }
 
-      resultEl.textContent = 'Elige dónde guardar el ZIP…';
+      resultEl.textContent = IS_WEB ? 'Preparando el ZIP…' : 'Elige dónde guardar el ZIP…';
       const startTime = Date.now();
       window.api.onModsExportProgress((info) => renderProgressBar(resultEl, info, startTime));
 

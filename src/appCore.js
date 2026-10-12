@@ -14,6 +14,8 @@ const playerFiles = require('./playerFiles');
 const settings = require('./settings');
 const duckdns = require('./duckdns');
 const playit = require('./playit');
+const curseforge = require('./curseforge');
+const clientSync = require('./clientSync');
 
 /** Primera IPv4 de la red local (la que usan los que están en tu misma WiFi). */
 function lanIpv4() {
@@ -522,19 +524,55 @@ function createAppCore({ send, notify, minuteMs = 60 * 1000 }) {
     // ---------- Mods ----------
     'mods:analyze': async ({ folder, serverId }) => {
       try {
-        let results = await modAnalyzer.analyzeMods(folder);
-        if (serverId) {
-          const server = store.getServer(serverId);
-          if (server) {
-            const modsDir = path.join(server.dir, 'mods');
+        let { results, warnings } = await modAnalyzer.analyzeMods(folder);
+        let isServerModsFolder = false;
+        const server = serverId ? store.getServer(serverId) : null;
+        if (server) {
+          const modsDir = path.join(server.dir, 'mods');
+          // Si se analiza la propia carpeta mods del servidor, compararla consigo
+          // misma marcaría todo como "ya está igual" (y lo dejaría desmarcado).
+          isServerModsFolder = modAnalyzer.samePath(folder, modsDir);
+          if (!isServerModsFolder) {
             results = await modAnalyzer.diffAgainstServer(results, modsDir);
+            modAnalyzer.markDuplicates(results); // con "ya está igual" se elige mejor cuál dejar
           }
         }
-        return { ok: true, results };
+        return { ok: true, results, warnings, isServerModsFolder, curseforge: curseforge.publicInfo().configured };
       } catch (err) {
         return { ok: false, error: err.message };
       }
     },
+
+    // Comparar un cliente con el servidor (qué falta, qué sobra, qué versión es otra)
+    'mods:compareClient': async ({ folder, serverId }) => {
+      try {
+        const server = requireServer(serverId);
+        const modsDir = path.join(server.dir, 'mods');
+        if (modAnalyzer.samePath(folder, modsDir)) {
+          throw new Error('Esa es la carpeta mods del propio servidor: elige la de tu Minecraft (la del cliente).');
+        }
+        const result = await clientSync.compareClientWithServer(folder, modsDir);
+        return { ok: true, ...result, curseforge: curseforge.publicInfo().configured };
+      } catch (err) {
+        return { ok: false, error: err.message };
+      }
+    },
+
+    'mods:applyClientSync': ({ folder, serverId, remove, copy, replace }) => {
+      try {
+        const server = requireServer(serverId);
+        const modsDir = path.join(server.dir, 'mods');
+        if (modAnalyzer.samePath(folder, modsDir)) throw new Error('Esa es la carpeta del servidor, no la del cliente.');
+        return { ok: true, ...clientSync.applyClientSync(folder, modsDir, { remove, copy, replace }) };
+      } catch (err) {
+        return { ok: false, error: err.message };
+      }
+    },
+
+    // CurseForge (la clave nunca sale de aquí: publicInfo solo dice si está puesta)
+    'app:getCurseForge': () => curseforge.publicInfo(),
+    'app:setCurseForge': (apiKey) => curseforge.setApiKey(apiKey),
+    'app:removeCurseForge': () => curseforge.removeApiKey(),
 
     'mods:apply': ({ serverId, results, includeUnknown }) => {
       try {

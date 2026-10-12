@@ -41,7 +41,7 @@ par de clics.
   - Java 17+ recomendado para Minecraft 1.18+.
   - Java 8 si vas a montar servidores de versiones muy antiguas (no cubierto por esta guía).
 - Conexión a internet: la app descarga los servidores/instaladores oficiales
-  (Mojang, Forge, NeoForge) y consulta la API pública de Modrinth para el análisis de mods.
+  (Mojang, Forge, NeoForge) y consulta la API pública de Modrinth (y la de CurseForge, si pones tu clave) para el análisis de mods.
 
 ## Instalación y arranque
 
@@ -89,17 +89,59 @@ listado igual que uno creado desde la app.
 
 ### Analizar y copiar mods (Forge/NeoForge)
 
-En la pestaña **Mods**, pulsa "Elegir carpeta de mods del cliente" y selecciona la
-carpeta `mods` de tu instalación de cliente. La app:
+En la pestaña **Mods**, pulsa "Elegir carpeta de mods" y selecciona la carpeta
+`mods` de tu Minecraft (cliente) **o la del propio servidor**. Para cada `.jar`, la app
+busca en este orden:
 
-1. Calcula el hash SHA-1 de cada `.jar`.
-2. Consulta la API de Modrinth (`/v2/version_files`) para identificar cada mod por hash.
-3. Comprueba el campo `server_side` del proyecto en Modrinth:
-   - `required` u `optional` → se marca como **necesario en servidor** (se copia).
-   - `unsupported` → se marca como **solo cliente** (no se copia).
-   - Si el mod no está en Modrinth (por ejemplo, solo está en CurseForge) se marca
-     como **no identificado**: decides tú manualmente si lo incluyes o no.
-4. Puedes desmarcar/marcar cada mod antes de copiarlo.
+1. **Modrinth**, por hash SHA-1 (no necesita nada). Según el campo `server_side`:
+   `required`/`optional` → **necesario en servidor**; `unsupported` → **solo cliente**.
+2. **CurseForge**, por fingerprint (el mismo método que usa la app de CurseForge),
+   solo para los que no están en Modrinth. Necesita una clave de API gratuita (ver abajo).
+   Si el autor ha marcado el archivo como "Client" o "Server", se usa eso; si no,
+   sale como **lado sin indicar**, ya con su nombre y su enlace para que lo revises.
+3. **La ficha que trae el propio `.jar`** (`neoforge.mods.toml`, `mods.toml` o
+   `fabric.mod.json`): saca el nombre del mod y, si el autor lo declara solo de
+   cliente (`displayTest="IGNORE_SERVER_VERSION"` o `"environment": "client"`), lo
+   marca así.
+
+Lo que no se identifica por ninguna vía sale como **no identificado** y va en la
+lista del servidor por si acaso.
+
+Todos los mods salen marcados; cada lista tiene **Marcar todos / Desmarcar todos** y
+un contador. Si analizas la carpeta de tu cliente, la columna "En el servidor" dice
+si cada uno es nuevo, una actualización o "Ya está igual"; al copiar, los que ya
+están iguales se saltan solos. Si analizas la carpeta `mods` del propio servidor,
+sirve para ver qué mods son **solo de cliente** (sobran en el servidor y a veces lo
+hacen fallar) y para generar los ZIP.
+
+#### Comparar tu cliente con el servidor
+
+Botón **"Comparar mi cliente con este servidor"**: eliges la carpeta `mods` de tu
+Minecraft (o la de un amigo) y la app la compara con la del servidor:
+
+| Grupo | Qué significa | Qué propone |
+|---|---|---|
+| Te faltan | El servidor los tiene y hacen falta en el cliente ("Necesario"/"Revisar"; los "Opcional" salen desmarcados) | Copiarlos desde el servidor |
+| En otra versión | Mismo mod, otra versión | Cambiar la tuya por la del servidor |
+| Solo de servidor | Mods que solo funcionan en el servidor | Quitarlos de tu cliente |
+| Los tienes tú, pero el servidor no | Si son de contenido, el servidor te echa al entrar | Quitarlos (desmarcado: decides tú) |
+| Solo de cliente | Gráficos, interfaz, minimapa… | Nada, están bien |
+
+**"Arreglar mi cliente con lo marcado"** aplica los cambios. No se borra nada: lo
+que se quita o se sustituye se mueve a `mods-quitados-<fecha>`, junto a tu carpeta
+`mods`. Cierra Minecraft antes.
+
+**"ZIP con los mods que necesita un cliente"** genera el pack para tus amigos: todos
+los mods del servidor que hacen falta en el cliente, en la versión del servidor.
+
+#### Clave de CurseForge (opcional)
+
+1. Entra en [console.curseforge.com](https://console.curseforge.com), inicia sesión y ve a **API keys**.
+2. Copia la clave y pégala en la app: **Ajustes → Analizar mods: CurseForge → Guardar y comprobar**.
+
+La clave se comprueba con CurseForge antes de guardarla, se guarda solo en
+`settings.json` de este PC (que no se sube a GitHub) y nunca se muestra en la
+interfaz. También puedes ponerla en la variable de entorno `CURSEFORGE_API_KEY`.
 
 Tienes dos formas de llevar los mods al servidor:
 
@@ -243,9 +285,9 @@ Notas:
 
 ## Limitaciones conocidas
 
-- **Detección de mods vía Modrinth únicamente.** Mods publicados solo en CurseForge
-  no se identifican por hash (su API de hashes exige clave de pago). Se listan como
-  "no identificado" para decidir manualmente.
+- **Lado cliente/servidor de los mods de CurseForge.** Muchos autores no marcan sus
+  archivos como "Client"/"Server" en CurseForge; en ese caso el mod sale identificado
+  pero como "lado sin indicar", y decides tú.
 - **Forge muy antiguo (pre-1.17)** no genera `run.sh`/`run.bat`; la app detecta ese
   caso y lanza el jar directamente, pero no está probado a fondo en versiones muy
   antiguas.
@@ -273,7 +315,9 @@ src/
   javaProcess.js            Arranca/para el proceso Java, gestiona su consola y mide CPU/RAM
   processTree.js             Encuentra el PID real de java bajo run.bat/run.sh
   jvmFlags.js                Flags de JVM optimizados (Aikar's flags)
-  modAnalyzer.js             Hash + consulta a Modrinth + copiado + diff de mods
+  modAnalyzer.js             Análisis de mods (Modrinth → CurseForge → ficha del .jar), copiado y diff
+  curseforge.js              Fingerprint y API de CurseForge (clave guardada solo en este PC)
+  clientSync.js              Comparar los mods de un cliente con los del servidor y arreglarlo
   zipWriter.js                ZIP sin dependencias: escribe directo a disco, ZIP64 (>4 GB) y extracción segura
   backupManager.js            Backups del mundo y completos: crear, listar, restaurar y borrar
   crashDiagnostics.js          Traduce el log de una caída a un mensaje en español
@@ -819,9 +863,3 @@ el PC se suspenda.
 Si quieres que funcione **con tu PC apagado**, la única forma es mover todo a una
 máquina que esté siempre encendida (un VPS o un miniPC en casa).
 
-## Pendiente
-
-Queda fuera de esta tanda, tal y como se habló: una segunda fuente de
-identificación de mods vía la API de CurseForge, para los casos que Modrinth no
-reconoce. Necesita una clave de API propia (de pago), así que se deja para
-cuando/si se decide dar ese paso.

@@ -120,3 +120,24 @@ test('backupFilePath solo devuelve backups existentes de ese servidor', async ()
   assert.throws(() => core.backupFilePath(server.id, '../server.properties.zip'), /no válido/);
   assert.throws(() => core.backupFilePath(server.id, 'completo-nada.zip'), /No se encuentra/);
 });
+
+test('mods:analyze sobre la carpeta mods del propio servidor: no compara consigo misma (todo queda marcado)', async () => {
+  const core = newCore();
+  const server = makeServer('modsrv');
+  const originalFetch = global.fetch;
+  global.fetch = async () => ({ ok: true, status: 200, json: async () => ({}) }); // Modrinth sin resultados
+  try {
+    const own = await core.handlers['mods:analyze']({ folder: path.join(server.dir, 'mods'), serverId: server.id }, ctx);
+    assert.equal(own.ok, true, own.error);
+    assert.equal(own.isServerModsFolder, true);
+    assert.equal(own.results[0].serverState, undefined, 'sin "Ya está igual"');
+
+    const clientDir = path.join(process.env.DATA_DIR, 'cliente-mods');
+    writeFile(path.join(clientDir, 'a.jar'), 'mod');
+    const client = await core.handlers['mods:analyze']({ folder: clientDir, serverId: server.id }, ctx);
+    assert.equal(client.isServerModsFolder, false);
+    assert.equal(client.results[0].serverState, 'same');
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
