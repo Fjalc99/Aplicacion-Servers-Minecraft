@@ -56,3 +56,59 @@ test('extractZip rechaza un fichero que no es ZIP', () => {
   const bad = writeFile(path.join(tmpDir(), 'bad.zip'), 'esto no es un zip');
   assert.throws(() => extractZip(bad, tmpDir()), /ZIP no válido/);
 });
+
+test('extractZip se niega a escribir fuera de la carpeta destino ("../")', async () => {
+  const src = tmpDir();
+  writeFile(path.join(src, 'x.txt'), 'malo');
+  const zipPath = path.join(tmpDir(), 'evil.zip');
+  await createZip([{ name: '../fuera.txt', filePath: path.join(src, 'x.txt') }], zipPath);
+
+  const parent = tmpDir();
+  const dest = path.join(parent, 'dest');
+  fs.mkdirSync(dest);
+  assert.throws(() => extractZip(zipPath, dest), /ruta no permitida/);
+  assert.equal(fs.existsSync(path.join(parent, 'fuera.txt')), false);
+});
+
+test('createZip escribe primero en .part y no deja restos si falla', async () => {
+  const outDir = tmpDir();
+  const zipPath = path.join(outDir, 'out.zip');
+  await assert.rejects(createZip([{ name: 'no.txt', filePath: path.join(outDir, 'no-existe.txt') }], zipPath));
+  assert.deepEqual(fs.readdirSync(outDir), []);
+});
+
+test('createZip con skipUnreadable salta lo que no puede leer y lo informa', async () => {
+  const src = tmpDir();
+  writeFile(path.join(src, 'ok.txt'), 'bien');
+  const zipPath = path.join(tmpDir(), 'out.zip');
+  const result = await createZip(
+    [
+      { name: 'ok.txt', filePath: path.join(src, 'ok.txt') },
+      { name: 'desaparecido.txt', filePath: path.join(src, 'desaparecido.txt') },
+    ],
+    zipPath,
+    null,
+    { skipUnreadable: true }
+  );
+  assert.equal(result.count, 1);
+  assert.deepEqual(result.skipped.map((s) => s.name), ['desaparecido.txt']);
+  const dest = tmpDir();
+  assert.deepEqual(extractZip(zipPath, dest), ['ok.txt']);
+});
+
+test('extractZipAsync extrae igual que extractZip e informa del progreso', async () => {
+  const { extractZipAsync } = require('../src/zipWriter');
+  const src = tmpDir();
+  writeFile(path.join(src, 'mods', 'a.jar'), crypto.randomBytes(300 * 1024));
+  writeFile(path.join(src, 'config', 'b.toml'), 'x = 1');
+  const zipPath = path.join(tmpDir(), 'out.zip');
+  await createZipFromDirectory(src, zipPath, 'srv');
+
+  const dest = tmpDir();
+  let last = null;
+  await extractZipAsync(zipPath, dest, (info) => (last = info));
+  assert.equal(last.doneCount, 2);
+  assert.equal(last.doneBytes, last.totalBytes);
+  assert.ok(fs.readFileSync(path.join(dest, 'srv', 'mods', 'a.jar')).equals(fs.readFileSync(path.join(src, 'mods', 'a.jar'))));
+  assert.equal(fs.readFileSync(path.join(dest, 'srv', 'config', 'b.toml'), 'utf-8'), 'x = 1');
+});

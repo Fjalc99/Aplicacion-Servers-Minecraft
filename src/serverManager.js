@@ -437,7 +437,29 @@ function importWorld(serverId, worldSourcePath) {
   return { destPath, levelName };
 }
 
+/**
+ * Tras restaurar un backup completo, server.properties del disco vuelve a ser el
+ * de ese momento: se recarga en la app para que la configuración que se ve
+ * coincida. El puerto se mantiene el actual (puede que ya se lo hayas dado a
+ * otro servidor o que esté redirigido en playit/router).
+ */
+function reloadPropertiesFromDisk(id) {
+  const server = store.getServer(id);
+  if (!server) throw new Error('Servidor no encontrado');
+  const propsPath = path.join(server.dir, 'server.properties');
+  if (!fs.existsSync(propsPath)) return server;
+  const currentPort = server.properties && server.properties['server-port'];
+  const fromDisk = normalizeDetectedProperties(parseServerProperties(fs.readFileSync(propsPath, 'utf-8')));
+  server.properties = normalizedProperties({ ...fromDisk, 'server-port': currentPort || fromDisk['server-port'] });
+  if (String(fromDisk['server-port']) !== String(server.properties['server-port'])) {
+    fs.writeFileSync(propsPath, buildServerProperties(server.properties));
+  }
+  store.saveServer(server);
+  return server;
+}
+
 module.exports = {
+  reloadPropertiesFromDisk,
   createServer,
   deleteServer,
   updateProperties,

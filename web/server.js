@@ -18,6 +18,7 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const { spawn } = require('child_process');
 const { WebSocketServer } = require('ws');
 
@@ -217,6 +218,8 @@ function buildBrowserPreload() {
 
 function createWebServer() {
   let wss = null;
+  // Enlaces de descarga de backups pendientes: token -> { username, filePath, fileName, expiresAt }
+  const backupDownloads = new Map();
 
   // Canales de eventos que pertenecen a un servidor concreto: servers:log:<id>, etc.
   const SERVER_EVENT = /^servers:(?:log|exit|players|backupProgress):(.+)$/;
@@ -372,6 +375,26 @@ function createWebServer() {
     'account:changePassword': ({ current, next }, ctx) => {
       auth.changeOwnPassword(ctx.user.username, current, next);
       return true;
+    },
+
+    // En escritorio es "Guardar como"; aquí se genera un enlace de descarga de un
+    // solo uso, válido 10 minutos y solo para quien lo pidió (los permisos ya se
+    // han comprobado en access.authorize antes de llegar aquí).
+    'servers:downloadBackup': ({ id, fileName }, ctx) => {
+      try {
+        const filePath = core.backupFilePath(id, fileName);
+        for (const [old, entry] of backupDownloads) if (entry.expiresAt < Date.now()) backupDownloads.delete(old);
+        const token = crypto.randomBytes(24).toString('hex');
+        backupDownloads.set(token, {
+          username: ctx.user.username,
+          filePath,
+          fileName,
+          expiresAt: Date.now() + 10 * 60 * 1000,
+        });
+        return { ok: true, downloadUrl: `/downloads/backup/${token}` };
+      } catch (err) {
+        return { ok: false, error: err.message };
+      }
     },
 
     'mods:exportZip': async ({ serverId, results }, ctx) => {
@@ -622,6 +645,28 @@ function createWebServer() {
       const file = safeJoin(PUBLIC_DIR, pathname.slice('/web/'.length));
       if (file) sendFile(res, file);
       else { res.writeHead(403); res.end(); }
+      return;
+    }
+
+    if (pathname.startsWith('/downloads/backup/')) {
+      const token = pathname.slice('/downloads/backup/'.length);
+      const entry = backupDownloads.get(token);
+      backupDownloads.delete(token); // un solo uso
+      if (!entry || entry.expiresAt < Date.now() || entry.username.toLowerCase() !== user.username.toLowerCase()) {
+        res.writeHead(404);
+        res.end('Enlace caducado o no válido. Vuelve a pulsar "Descargar".');
+        return;
+      }
+      fs.stat(entry.filePath, (err, stat) => {
+        if (err) { res.writeHead(404); res.end('No encontrado'); return; }
+        const asciiName = entry.fileName.replace(/[^\w.\-]+/g, '_');
+        res.writeHead(200, {
+          'Content-Type': MIME['.zip'],
+          'Content-Length': stat.size,
+          'Content-Disposition': `attachment; filename="${asciiName}"; filename*=UTF-8''${encodeURIComponent(entry.fileName)}`,
+        });
+        fs.createReadStream(entry.filePath).pipe(res);
+      });
       return;
     }
 

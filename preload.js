@@ -70,6 +70,8 @@ contextBridge.exposeInMainWorld('api', {
   // Backups
   listBackups: (id) => ipcRenderer.invoke('servers:listBackups', id),
   createBackup: (id) => ipcRenderer.invoke('servers:createBackup', id),
+  createFullBackup: (id) => ipcRenderer.invoke('servers:createFullBackup', id),
+  downloadBackup: (id, fileName) => ipcRenderer.invoke('servers:downloadBackup', { id, fileName }),
   restoreBackup: (id, fileName) => ipcRenderer.invoke('servers:restoreBackup', { id, fileName }),
   deleteBackup: (id, fileName) => ipcRenderer.invoke('servers:deleteBackup', { id, fileName }),
   onBackupProgress: (id, cb) => ipcRenderer.on(`servers:backupProgress:${id}`, (e, info) => cb(info)),

@@ -866,8 +866,15 @@ function renderOverview(server) {
     </div>
     <div class="card">
       <h3>Copias de seguridad</h3>
-      <p class="hint" style="margin-top:0;">Comprime la carpeta del mundo tal cual está ahora. Se guardan en <code>backups/</code> dentro de la carpeta del servidor (se conservan las 10 más recientes).</p>
-      <button id="backupNowBtn" class="btn btn-accent">Backup ahora</button>
+      <p class="hint" style="margin-top:0;">
+        <strong>Backup del mundo</strong>: solo la carpeta del mundo; rápido, ideal para hacerlo a menudo (se conservan los 10 más recientes).<br>
+        <strong>Backup completo</strong>: la carpeta entera del servidor (mods, config, server.properties, mundo, jugadores, librerías…), sin logs ni backups anteriores. Ocupa más; se conservan los 3 más recientes.<br>
+        Se guardan en <code>backups/</code> dentro de la carpeta del servidor. Si está encendido, se pausa el guardado del mundo mientras se copia.
+      </p>
+      <div class="backup-actions">
+        <button id="backupNowBtn" class="btn btn-accent">Backup del mundo</button>
+        <button id="fullBackupBtn" class="btn btn-ghost">Backup completo</button>
+      </div>
       <div id="backupNowMsg" class="hint" style="margin-top:8px;"></div>
       <div id="backupsList" style="margin-top:14px;"><p class="hint">Cargando…</p></div>
     </div>
@@ -883,26 +890,8 @@ function renderOverview(server) {
 
   document.getElementById('cloneServerBtn').addEventListener('click', () => openCloneWizard(server));
 
-  document.getElementById('backupNowBtn').addEventListener('click', async () => {
-    const btn = document.getElementById('backupNowBtn');
-    const msg = document.getElementById('backupNowMsg');
-    btn.disabled = true;
-    msg.innerHTML = '<div class="progress-bar-wrap"><div class="progress-bar-track"><div class="progress-bar-fill" style="width:0%"></div></div><span class="progress-bar-label">Preparando…</span></div>';
-
-    const startTime = Date.now();
-    window.api.onBackupProgress(server.id, (info) => renderProgressBar(msg, info, startTime));
-
-    const result = await window.api.createBackup(server.id);
-    window.api.removeBackupProgressListeners(server.id);
-    btn.disabled = false;
-    if (!result.ok) {
-      msg.innerHTML = `<span class="error-text">Error: ${escapeHtml(result.error)}</span>`;
-      return;
-    }
-    const mb = (result.size / 1024 / 1024).toFixed(1);
-    msg.textContent = `Backup creado (${mb} MB).`;
-    refreshBackupsList(server);
-  });
+  document.getElementById('backupNowBtn').addEventListener('click', () => runBackup(server, 'world'));
+  document.getElementById('fullBackupBtn').addEventListener('click', () => runBackup(server, 'full'));
 
   document.getElementById('importWorldBtn').addEventListener('click', async () => {
     const folder = await window.api.pickWorldFolder();
@@ -930,6 +919,56 @@ function renderOverview(server) {
   });
 }
 
+function formatSize(bytes) {
+  if (bytes >= 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function progressPlaceholder(text) {
+  return `<div class="progress-bar-wrap"><div class="progress-bar-track"><div class="progress-bar-fill" style="width:0%"></div></div><span class="progress-bar-label">${escapeHtml(text)}</span></div>`;
+}
+
+function setBackupButtonsDisabled(disabled) {
+  for (const el of document.querySelectorAll('#backupNowBtn, #fullBackupBtn, #backupsList button')) {
+    el.disabled = disabled;
+  }
+}
+
+/** Avisa de ficheros que no se pudieron copiar (bloqueados por otro programa). */
+function skippedNote(skipped) {
+  if (!skipped || skipped.length === 0) return '';
+  const names = skipped.slice(0, 3).map((f) => escapeHtml(f.name)).join(', ');
+  const more = skipped.length > 3 ? ` y ${skipped.length - 3} más` : '';
+  return `<br><span class="hint">No se pudieron copiar ${skipped.length} archivo(s) que estaban en uso: ${names}${more}. Si son importantes, repite el backup con el servidor apagado.</span>`;
+}
+
+/** kind: 'world' (solo el mundo) o 'full' (carpeta entera del servidor). */
+async function runBackup(server, kind) {
+  const msg = document.getElementById('backupNowMsg');
+  setBackupButtonsDisabled(true);
+  msg.innerHTML = progressPlaceholder(kind === 'full' ? 'Preparando backup completo…' : 'Preparando…');
+
+  const startTime = Date.now();
+  window.api.onBackupProgress(server.id, (info) => renderProgressBar(msg, info, startTime));
+  try {
+    const result = kind === 'full'
+      ? await window.api.createFullBackup(server.id)
+      : await window.api.createBackup(server.id);
+    if (!result.ok) {
+      msg.innerHTML = `<span class="error-text">Error: ${escapeHtml(result.error)}</span>`;
+      return;
+    }
+    const label = kind === 'full' ? 'Backup completo creado' : 'Backup del mundo creado';
+    msg.innerHTML = `${label} (${formatSize(result.size)}).${skippedNote(result.skipped)}`;
+  } catch (error) {
+    msg.innerHTML = `<span class="error-text">Error: ${escapeHtml(error.message)}</span>`;
+  } finally {
+    window.api.removeBackupProgressListeners(server.id);
+    setBackupButtonsDisabled(false);
+    refreshBackupsList(server);
+  }
+}
+
 async function refreshBackupsList(server) {
   const el = document.getElementById('backupsList');
   if (!el) return;
@@ -948,25 +987,31 @@ async function refreshBackupsList(server) {
   }
 
   el.innerHTML = `
-    <table class="mods-table">
-      <thead><tr><th>Fecha</th><th>Tamaño</th><th></th></tr></thead>
+    <table class="mods-table backups-table">
+      <thead><tr><th>Tipo</th><th>Fecha</th><th>Tamaño</th><th></th></tr></thead>
       <tbody>
         ${backups
           .map(
             (b) => `
           <tr>
+            <td>${b.kind === 'full'
+              ? '<span class="badge badge-full">Completo</span>'
+              : '<span class="badge badge-world">Mundo</span>'}</td>
             <td>${new Date(b.createdAt).toLocaleString()}</td>
-            <td>${(b.size / 1024 / 1024).toFixed(1)} MB</td>
-            <td style="display:flex; gap:6px;">
-              <button class="btn btn-ghost" data-action="restore" data-file="${escapeHtml(b.fileName)}">Restaurar</button>
+            <td>${formatSize(b.size)}</td>
+            <td><div class="backup-row-actions">
+              <button class="btn btn-ghost" data-action="restore" data-kind="${b.kind}" data-file="${escapeHtml(b.fileName)}">Restaurar</button>
+              <button class="btn btn-ghost" data-action="download" data-file="${escapeHtml(b.fileName)}">Descargar</button>
               <button class="btn btn-ghost" data-action="delete" data-file="${escapeHtml(b.fileName)}">Eliminar</button>
-            </td>
+            </div></td>
           </tr>`
           )
           .join('')}
       </tbody>
     </table>
   `;
+
+  const msg = document.getElementById('backupNowMsg');
 
   el.querySelectorAll('button[data-action="restore"]').forEach((btn) => {
     btn.addEventListener('click', async () => {
@@ -975,16 +1020,63 @@ async function refreshBackupsList(server) {
         alert('Detén el servidor antes de restaurar un backup.');
         return;
       }
+      const full = btn.dataset.kind === 'full';
       const ok = confirm(
-        'Esto sustituirá el mundo actual por el del backup. El mundo actual no se borra, se renombra por seguridad. ¿Continuar?'
+        full
+          ? 'Esto devolverá TODA la carpeta del servidor (mods, config, mundo, jugadores…) a como estaba en ese backup.\n\n' +
+              'Lo que hay ahora no se borra: se mueve entero a backups/antes-de-restaurar-completo-<fecha>.\n\n¿Continuar?'
+          : 'Esto sustituirá el mundo actual por el del backup. El mundo actual no se borra, se renombra por seguridad. ¿Continuar?'
       );
       if (!ok) return;
-      const result = await window.api.restoreBackup(server.id, btn.dataset.file);
-      if (!result.ok) {
-        alert('Error: ' + result.error);
-        return;
+
+      setBackupButtonsDisabled(true);
+      msg.innerHTML = progressPlaceholder('Restaurando…');
+      const startTime = Date.now();
+      window.api.onBackupProgress(server.id, (info) => renderProgressBar(msg, info, startTime));
+      try {
+        const result = await window.api.restoreBackup(server.id, btn.dataset.file);
+        if (!result.ok) {
+          msg.innerHTML = `<span class="error-text">Error: ${escapeHtml(result.error)}</span>`;
+          return;
+        }
+        if (result.kind === 'full') {
+          msg.innerHTML = `Backup completo restaurado. Tu versión anterior está en <code>${escapeHtml(result.previousSavedAs)}</code>; bórrala cuando compruebes que todo va bien.`;
+          if (result.server) {
+            const i = state.servers.findIndex((s) => s.id === server.id);
+            if (i !== -1) state.servers[i] = { ...state.servers[i], ...result.server };
+          }
+        } else {
+          msg.textContent = 'Backup del mundo restaurado.';
+        }
+      } catch (error) {
+        msg.innerHTML = `<span class="error-text">Error: ${escapeHtml(error.message)}</span>`;
+      } finally {
+        window.api.removeBackupProgressListeners(server.id);
+        setBackupButtonsDisabled(false);
+        refreshBackupsList(server);
       }
-      alert('Backup restaurado correctamente.');
+    });
+  });
+
+  el.querySelectorAll('button[data-action="download"]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      try {
+        const result = await window.api.downloadBackup(server.id, btn.dataset.file);
+        if (result.canceled) return;
+        if (!result.ok) {
+          msg.innerHTML = `<span class="error-text">Error: ${escapeHtml(result.error)}</span>`;
+          return;
+        }
+        if (result.savedTo) {
+          msg.innerHTML = `Copia guardada en <strong>${escapeHtml(result.savedTo)}</strong>
+            <button id="showBackupCopyBtn" class="btn btn-ghost" style="margin-left:8px;">Mostrar en la carpeta</button>`;
+          document.getElementById('showBackupCopyBtn').addEventListener('click', () => window.api.showInFolder(result.savedTo));
+        } else {
+          msg.textContent = 'Descarga iniciada.';
+        }
+      } catch (error) {
+        msg.innerHTML = `<span class="error-text">Error: ${escapeHtml(error.message)}</span>`;
+      }
     });
   });
 
@@ -992,7 +1084,8 @@ async function refreshBackupsList(server) {
     btn.addEventListener('click', async () => {
       const ok = confirm('¿Eliminar este backup? No se puede deshacer.');
       if (!ok) return;
-      await window.api.deleteBackup(server.id, btn.dataset.file);
+      const result = await window.api.deleteBackup(server.id, btn.dataset.file);
+      if (result && result.ok === false) msg.innerHTML = `<span class="error-text">Error: ${escapeHtml(result.error)}</span>`;
       refreshBackupsList(server);
     });
   });

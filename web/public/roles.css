@@ -21,13 +21,15 @@ body[data-role="amigo"] #settingsBtn {
   display: none !important;
 }
 
-/* En los servidores del administrador, un amigo solo enciende, apaga, mira y hace backups */
+/* En los servidores del administrador, un amigo solo enciende, apaga, mira y hace backups del mundo */
 body[data-role="amigo"][data-server-access="shared"] #btnDelete,
 body[data-role="amigo"][data-server-access="shared"] .tab[data-tab="config"],
 body[data-role="amigo"][data-server-access="shared"] #tab-config,
 body[data-role="amigo"][data-server-access="shared"] .card:has(#cloneServerBtn),
 body[data-role="amigo"][data-server-access="shared"] [data-action="restore"],
 body[data-role="amigo"][data-server-access="shared"] [data-action="delete"],
+body[data-role="amigo"][data-server-access="shared"] [data-action="download"],
+body[data-role="amigo"][data-server-access="shared"] #fullBackupBtn,
 body[data-role="amigo"][data-server-access="shared"] [data-remove] {
   display: none !important;
 }

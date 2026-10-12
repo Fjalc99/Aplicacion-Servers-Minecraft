@@ -164,7 +164,7 @@
       }
 
       // En escritorio el ZIP se guarda con "Guardar como"; aquí se descarga.
-      if (channel === 'mods:exportZip' && result && result.ok && result.downloadUrl) {
+      if ((channel === 'mods:exportZip' || channel === 'servers:downloadBackup') && result && result.ok && result.downloadUrl) {
         triggerDownload(result.downloadUrl);
       }
 

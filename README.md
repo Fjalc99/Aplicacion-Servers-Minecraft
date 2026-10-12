@@ -274,8 +274,8 @@ src/
   processTree.js             Encuentra el PID real de java bajo run.bat/run.sh
   jvmFlags.js                Flags de JVM optimizados (Aikar's flags)
   modAnalyzer.js             Hash + consulta a Modrinth + copiado + diff de mods
-  zipWriter.js                Generador/extractor de ZIP sin dependencias externas
-  backupManager.js            Crear, listar, restaurar y borrar backups del mundo
+  zipWriter.js                ZIP sin dependencias: escribe directo a disco, ZIP64 (>4 GB) y extracción segura
+  backupManager.js            Backups del mundo y completos: crear, listar, restaurar y borrar
   crashDiagnostics.js          Traduce el log de una caída a un mensaje en español
   playerFiles.js               Lectura/edición de whitelist.json, ops.json, banned-players.json
   appCore.js                   Lógica compartida por escritorio y web (lanzar, backups, handlers)
@@ -346,20 +346,39 @@ Para seguir desarrollando de forma ordenada a partir de aquí:
 
 > Rama sugerida para probar esto antes de fusionarlo a `main`: `git checkout -b fiabilidad-backups-reinicio`.
 
-### Copias de seguridad del mundo
+### Copias de seguridad
 
-Pestaña **Resumen** → tarjeta "Copias de seguridad":
+Pestaña **Resumen** → tarjeta "Copias de seguridad". Hay dos tipos:
 
-- **Backup ahora** — comprime la carpeta del mundo tal cual está en ese momento en
-  `backups/backup-<mundo>-<fecha>.zip`, dentro de la carpeta del servidor. Se
-  conservan automáticamente las 10 copias más recientes; las más antiguas se
-  eliminan solas. Muestra una barra de progreso real (por bytes procesados, no
-  solo un giro indefinido) con una estimación del tiempo restante.
-- **Restaurar** — sustituye el mundo actual por el contenido del backup elegido.
-  El mundo que hubiera antes de restaurar **no se borra**: se renombra con un
-  sufijo `.antes-de-restaurar-<fecha>` por si hace falta recuperarlo. No se puede
-  restaurar con el servidor en marcha.
+| | Backup del mundo | Backup completo |
+|---|---|---|
+| Qué guarda | Solo la carpeta del mundo | **Toda** la carpeta del servidor: `mods/`, `config/`, `server.properties`, mundo, whitelist/ops/baneados, librerías de Forge/NeoForge, scripts de arranque… |
+| Qué no guarda | — | `backups/`, `logs/`, `crash-reports/` y las copias apartadas al restaurar |
+| Fichero | `backups/backup-<mundo>-<fecha>.zip` | `backups/completo-<fecha>.zip` |
+| Se conservan | Los 10 más recientes | Los 3 más recientes (ocupan más) |
+| Para qué | Hacerlo a menudo | Antes de actualizar mods o NeoForge, mover el servidor a otro PC/VPS, o guardarlo fuera |
+
+- Los dos muestran una barra de progreso real con el tiempo restante.
+- **Con el servidor encendido**: antes de copiar se le manda `save-off` + `save-all flush`
+  (guarda todo en disco y deja de escribir el mundo), y al terminar `save-on`. Así
+  la copia no queda a medias y los jugadores pueden seguir jugando. Si algún
+  archivo está bloqueado por otro programa, se salta y te avisa de cuál.
+- **Restaurar** (con el servidor apagado):
+  - Backup del mundo: el mundo actual **no se borra**, se renombra a
+    `<mundo>.antes-de-restaurar-<fecha>`.
+  - Backup completo: deja la carpeta entera como estaba en ese momento. Lo que
+    hay ahora **no se borra**: se mueve entero a
+    `backups/antes-de-restaurar-completo-<fecha>/`. Si algo falla a mitad, se deshace
+    y todo queda como estaba. La configuración de la app se recarga del
+    `server.properties` restaurado, salvo el puerto, que se mantiene el actual.
+    Mientras se restaura no se puede encender el servidor.
+- **Descargar** — en el escritorio, "Guardar como" (un disco externo, la nube…);
+  en la web, una descarga normal. El enlace es de un solo uso, caduca en 10
+  minutos y solo vale para quien lo pidió.
 - **Eliminar** — borra un backup concreto que ya no necesites.
+
+> Un backup guardado en el mismo disco no te salva si ese disco se rompe: de vez
+> en cuando descarga un backup completo y guárdalo en otro sitio.
 
 Desde pestaña **Configuración** → tarjeta "Fiabilidad" puedes activar backups
 automáticos:
@@ -668,7 +687,8 @@ Hay dos tipos de servidor:
 |---|:-:|:-:|:-:|
 | Ver, consola, jugadores y gráficas | ✓ | ✓ | ✓ |
 | Encender y apagar | ✓ | ✓ | ✓ |
-| Hacer backups | ✓ | ✓ | ✓ |
+| Hacer backups del mundo | ✓ | ✓ | ✓ |
+| Backups completos y descargar backups | ✓ | ✗ | ✓ |
 | Escribir comandos, OP/Kick/Ban | ✓ | solo con `--comandos` | ✓ |
 | Forzar la parada | ✓ | ✗ | ✓ |
 | Restaurar o borrar backups | ✓ | ✗ | ✓ |

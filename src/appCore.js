@@ -34,7 +34,7 @@ function lanIpv4() {
  *   notify(title, body, serverId) -> muestra una notificación (serverId permite
  *                                    a la web enviarla solo a quien ve ese servidor)
  *
- * Devuelve { handlers, launchServer, buildModsZip }. Cada handler recibe
+ * Devuelve { handlers, launchServer, buildModsZip, backupFilePath }. Cada handler recibe
  * (arg, ctx), donde arg es el mismo único argumento que manda la interfaz y
  * ctx.reply(channel, payload) envía progreso a quien hizo la petición.
  */
@@ -95,6 +95,84 @@ function createAppCore({ send, notify, minuteMs = 60 * 1000 }) {
     idleStops.set(serverId, { timer, at: Date.now() + delay });
   }
 
+  // ---------------------------------------------------------------------------
+  // Copias de seguridad: una cosa cada vez por servidor
+  // ---------------------------------------------------------------------------
+  // serverId -> 'backup' | 'restore'. Evita dos backups a la vez (un backup
+  // completo puede tardar minutos) y que alguien encienda el servidor mientras
+  // se está restaurando su carpeta.
+  const backupJobs = new Map();
+
+  async function runBackupJob(serverId, kind, fn) {
+    const current = backupJobs.get(serverId);
+    if (current) {
+      throw new Error(
+        current === 'restore'
+          ? 'Se está restaurando un backup de este servidor; espera a que termine.'
+          : 'Ya se está haciendo un backup de este servidor; espera a que termine.'
+      );
+    }
+    backupJobs.set(serverId, kind);
+    try {
+      return await fn();
+    } finally {
+      backupJobs.delete(serverId);
+    }
+  }
+
+  // Esperas a una línea concreta de la consola (p. ej. "Saved the game").
+  const logWaiters = new Map(); // serverId -> Set<fn(line)>
+
+  function waitForLog(serverId, pattern, timeoutMs) {
+    return new Promise((resolve) => {
+      if (!logWaiters.has(serverId)) logWaiters.set(serverId, new Set());
+      const set = logWaiters.get(serverId);
+      const done = (value) => {
+        clearTimeout(timer);
+        set.delete(check);
+        resolve(value);
+      };
+      const check = (line) => {
+        if (pattern.test(line)) done(true);
+      };
+      const timer = setTimeout(() => done(false), timeoutMs);
+      set.add(check);
+    });
+  }
+
+  /**
+   * Si el servidor está en marcha, antes de copiar se le pide que guarde todo
+   * en disco y que deje de escribir el mundo mientras dura la copia (save-off),
+   * para que el backup no quede a medias. Al terminar (bien o mal) vuelve a
+   * guardar con normalidad (save-on).
+   */
+  async function withSavesPaused(server, fn) {
+    const status = javaProcess.isRunning(server.id) ? javaProcess.getStatus(server.id) : null;
+    if (!status || status.state !== 'online') return fn();
+
+    let paused = false;
+    try {
+      javaProcess.sendCommand(server.id, 'save-off');
+      paused = true;
+      const saved = waitForLog(server.id, /Saved the game|Saved the world/i, 60000);
+      javaProcess.sendCommand(server.id, 'save-all flush');
+      await saved;
+    } catch (err) {
+      /* si no acepta comandos, se copia igualmente */
+    }
+    try {
+      return await fn();
+    } finally {
+      if (paused && javaProcess.isRunning(server.id)) {
+        try {
+          javaProcess.sendCommand(server.id, 'save-on');
+        } catch (err) {
+          /* el servidor se ha cerrado mientras tanto */
+        }
+      }
+    }
+  }
+
   // serverId -> intervalId, para las copias de seguridad automáticas "cada X horas"
   const autoBackupIntervals = new Map();
 
@@ -113,7 +191,9 @@ function createAppCore({ send, notify, minuteMs = 60 * 1000 }) {
 
     const interval = setInterval(async () => {
       try {
-        await backupManager.createBackup(server);
+        await runBackupJob(server.id, 'backup', () =>
+          withSavesPaused(server, () => backupManager.createBackup(store.getServer(server.id) || server))
+        );
         send(`servers:log:${server.id}`, '\n[Backup automático realizado]\n');
       } catch (err) {
         send(`servers:log:${server.id}`, `\n[Backup automático fallido: ${err.message}]\n`);
@@ -130,9 +210,14 @@ function createAppCore({ send, notify, minuteMs = 60 * 1000 }) {
    * automático (que no viene de un clic del usuario).
    */
   function launchServer(server) {
+    if (backupJobs.get(server.id) === 'restore') {
+      throw new Error('Se está restaurando un backup de este servidor; espera a que termine para encenderlo.');
+    }
     javaProcess.startServer(server, {
       onLog: (line) => {
         send(`servers:log:${server.id}`, line);
+        const waiters = logWaiters.get(server.id);
+        if (waiters) for (const check of [...waiters]) check(line);
       },
       onReady: () => {
         notify('Servidor iniciado', `"${server.name}" ya está listo para jugar.`, server.id);
@@ -155,7 +240,7 @@ function createAppCore({ send, notify, minuteMs = 60 * 1000 }) {
           const current = store.getServer(server.id);
           if (current && current.autoBackup && current.autoBackup.onStop) {
             try {
-              await backupManager.createBackup(current);
+              await runBackupJob(server.id, 'backup', () => backupManager.createBackup(current));
               send(`servers:log:${server.id}`, '\n[Backup automático tras detener el servidor]\n');
             } catch (err) {
               send(`servers:log:${server.id}`, `\n[No se pudo hacer el backup automático: ${err.message}]\n`);
@@ -349,21 +434,53 @@ function createAppCore({ send, notify, minuteMs = 60 * 1000 }) {
     'servers:createBackup': async (id, ctx) => {
       try {
         const server = requireServer(id);
-        const result = await backupManager.createBackup(server, {
-          onProgress: (info) => ctx.reply(`servers:backupProgress:${id}`, info),
-        });
+        const result = await runBackupJob(id, 'backup', () =>
+          withSavesPaused(server, () =>
+            backupManager.createBackup(server, {
+              onProgress: (info) => ctx.reply(`servers:backupProgress:${id}`, info),
+            })
+          )
+        );
         return { ok: true, ...result };
       } catch (err) {
         return { ok: false, error: err.message };
       }
     },
 
-    'servers:restoreBackup': ({ id, fileName }) => {
+    // Backup de la carpeta entera del servidor (mods, config, mundo...)
+    'servers:createFullBackup': async (id, ctx) => {
+      try {
+        const server = requireServer(id);
+        const result = await runBackupJob(id, 'backup', () =>
+          withSavesPaused(server, () =>
+            backupManager.createFullBackup(server, {
+              onProgress: (info) => ctx.reply(`servers:backupProgress:${id}`, info),
+            })
+          )
+        );
+        return { ok: true, ...result };
+      } catch (err) {
+        return { ok: false, error: err.message };
+      }
+    },
+
+    // Restaura un backup del mundo o uno completo (según el fichero elegido).
+    'servers:restoreBackup': async ({ id, fileName }, ctx) => {
       try {
         const server = requireServer(id);
         if (javaProcess.isRunning(id)) throw new Error('Detén el servidor antes de restaurar un backup.');
-        const result = backupManager.restoreBackup(server, fileName);
-        return { ok: true, ...result };
+        if (!backupManager.isFullBackup(fileName)) {
+          const result = await runBackupJob(id, 'restore', async () => backupManager.restoreBackup(server, fileName));
+          return { ok: true, kind: 'world', ...result };
+        }
+        const result = await runBackupJob(id, 'restore', async () => {
+          if (javaProcess.isRunning(id)) throw new Error('Detén el servidor antes de restaurar un backup.');
+          return backupManager.restoreFullBackup(server, fileName, {
+            onProgress: (info) => ctx && ctx.reply && ctx.reply(`servers:backupProgress:${id}`, info),
+          });
+        });
+        const updated = serverManager.reloadPropertiesFromDisk(id);
+        return { ok: true, kind: 'full', ...result, server: updated };
       } catch (err) {
         return { ok: false, error: err.message };
       }
@@ -371,6 +488,7 @@ function createAppCore({ send, notify, minuteMs = 60 * 1000 }) {
 
     'servers:deleteBackup': ({ id, fileName }) => {
       try {
+        if (backupJobs.has(id)) throw new Error('Espera a que termine el backup o la restauración en curso.');
         backupManager.deleteBackup(requireServer(id), fileName);
         return { ok: true };
       } catch (err) {
@@ -430,7 +548,14 @@ function createAppCore({ send, notify, minuteMs = 60 * 1000 }) {
     },
   };
 
-  return { handlers, launchServer, buildModsZip };
+  /** Ruta de un backup existente (para descargarlo o guardarlo en otro sitio). */
+  function backupFilePath(id, fileName) {
+    const file = backupManager.backupPath(requireServer(id), fileName);
+    if (!fs.existsSync(file)) throw new Error('No se encuentra ese backup.');
+    return file;
+  }
+
+  return { handlers, launchServer, buildModsZip, backupFilePath };
 }
 
 module.exports = { createAppCore, autoStopConfig };

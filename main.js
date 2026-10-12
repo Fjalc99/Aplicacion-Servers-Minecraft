@@ -1,5 +1,6 @@
 const { app, BrowserWindow, ipcMain, shell, dialog, session, Tray, Menu, nativeImage, Notification } = require('electron');
 const path = require('path');
+const fs = require('fs');
 
 const store = require('./src/store');
 const javaProcess = require('./src/javaProcess');
@@ -227,6 +228,26 @@ ipcMain.handle('servers:openFolder', (e, id) => {
 ipcMain.handle('mods:showInFolder', (e, filePath) => {
   shell.showItemInFolder(filePath);
   return true;
+});
+
+// Guarda una copia de un backup donde elija el usuario (un disco externo, la
+// nube...). En la web, el mismo canal lo convierte en una descarga.
+ipcMain.handle('servers:downloadBackup', async (e, { id, fileName }) => {
+  try {
+    const source = core.backupFilePath(id, fileName);
+    const server = store.getServer(id);
+    const prefix = server ? `${server.name.replace(/[^\w\-]+/g, '_')}-` : '';
+    const save = await dialog.showSaveDialog(mainWindow, {
+      title: 'Guardar una copia del backup',
+      defaultPath: path.join(app.getPath('desktop'), `${prefix}${fileName}`),
+      filters: [{ name: 'Archivo ZIP', extensions: ['zip'] }],
+    });
+    if (save.canceled || !save.filePath) return { ok: false, canceled: true };
+    await fs.promises.copyFile(source, save.filePath);
+    return { ok: true, savedTo: save.filePath };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
 });
 
 ipcMain.handle('mods:exportZip', async (e, { serverId, results }) => {

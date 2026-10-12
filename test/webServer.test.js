@@ -377,3 +377,44 @@ test('lo que crea un amigo queda a su nombre, con un puerto libre de su rango', 
     serverManager.createServer = original;
   }
 });
+
+test('backups completos: el dueño los crea y descarga con un enlace de un solo uso; los demás no', async () => {
+  const fs = require('fs');
+  const deAmigo = store.getServer('deamigo');
+  fs.mkdirSync(path.join(deAmigo.dir, 'world'), { recursive: true });
+  fs.writeFileSync(path.join(deAmigo.dir, 'world', 'level.dat'), 'mundo');
+  fs.mkdirSync(path.join(deAmigo.dir, 'mods'), { recursive: true });
+  fs.writeFileSync(path.join(deAmigo.dir, 'mods', 'a.jar'), 'mod');
+
+  const amigo = await login('amigo', 'clave-amigo');
+  const created = await invoke(amigo, 'servers:createFullBackup', 'deamigo');
+  assert.equal(created.status, 200);
+  assert.equal(created.body.result.ok, true, created.body.result.error);
+  const { fileName } = created.body.result;
+
+  // Descarga: enlace de un solo uso, solo para quien lo pidió
+  const link = await invoke(amigo, 'servers:downloadBackup', { id: 'deamigo', fileName });
+  const url = link.body.result.downloadUrl;
+  assert.match(url, /^\/downloads\/backup\/[0-9a-f]{48}$/);
+
+  const otro = await login('lleno', 'clave-lleno');
+  assert.equal((await fetch(base + url, { headers: { Cookie: otro } })).status, 404, 'otro usuario no puede usar el enlace');
+
+  const link2 = (await invoke(amigo, 'servers:downloadBackup', { id: 'deamigo', fileName })).body.result.downloadUrl;
+  const res = await fetch(base + link2, { headers: { Cookie: amigo } });
+  assert.equal(res.status, 200);
+  assert.match(res.headers.get('content-disposition'), /attachment/);
+  const body = Buffer.from(await res.arrayBuffer());
+  assert.equal(body.readUInt32LE(0), 0x04034b50, 'es un ZIP');
+  assert.equal((await fetch(base + link2, { headers: { Cookie: amigo } })).status, 404, 'el enlace ya se ha usado');
+
+  // Nombres con rutas: rechazados
+  const evil = await invoke(amigo, 'servers:downloadBackup', { id: 'deamigo', fileName: '../../web-users.json.zip' });
+  assert.equal(evil.body.result.ok, false);
+
+  // En el servidor compartido del admin, un amigo no hace backups completos ni descarga
+  assert.equal((await invoke(amigo, 'servers:createFullBackup', 'compartido')).status, 403);
+  assert.equal((await invoke(amigo, 'servers:downloadBackup', { id: 'compartido', fileName })).status, 403);
+  // Y en el de otro amigo, ni lo ve
+  assert.equal((await invoke(amigo, 'servers:downloadBackup', { id: 'deana', fileName })).status, 404);
+});

@@ -63,6 +63,8 @@ const OWNER_CHANNELS = new Set([
   'servers:stop',
   'servers:sendCommand',
   'servers:createBackup',
+  'servers:createFullBackup',
+  'servers:downloadBackup',
   'servers:restoreBackup',
   'servers:deleteBackup',
   'servers:delete',

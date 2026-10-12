@@ -391,6 +391,13 @@ input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--accent);
 .badge-needed { background: var(--ok-soft); color: var(--ok); }
 .badge-client { background: var(--danger-soft); color: var(--danger); }
 .badge-unknown { background: var(--accent-soft); color: var(--accent-strong); }
+.badge-full { background: var(--accent-soft); color: var(--accent-strong); }
+.badge-world { background: var(--ok-soft); color: var(--ok); }
+
+/* Copias de seguridad */
+.backup-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.backup-row-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.backups-table td { vertical-align: middle; }
 
 /* ---------- Console ---------- */
 
