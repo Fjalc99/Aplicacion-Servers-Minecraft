@@ -76,6 +76,8 @@ const OWNER_CHANNELS = new Set([
   'servers:updateAutoStop',
   'servers:leaveQueue',
   'servers:applyPerformancePreset',
+  'servers:versionInfo',
+  'servers:updateVersion',
 ]);
 
 const LEVEL_NAME_PATTERN = /^[a-zA-Z0-9_\- ]{1,48}$/;

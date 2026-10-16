@@ -16,6 +16,7 @@ const duckdns = require('./duckdns');
 const playit = require('./playit');
 const curseforge = require('./curseforge');
 const clientSync = require('./clientSync');
+const loaderUpdater = require('./loaderUpdater');
 
 /** Primera IPv4 de la red local (la que usan los que están en tu misma WiFi). */
 function lanIpv4() {
@@ -108,11 +109,12 @@ function createAppCore({ send, notify, minuteMs = 60 * 1000 }) {
   async function runBackupJob(serverId, kind, fn) {
     const current = backupJobs.get(serverId);
     if (current) {
-      throw new Error(
-        current === 'restore'
-          ? 'Se está restaurando un backup de este servidor; espera a que termine.'
-          : 'Ya se está haciendo un backup de este servidor; espera a que termine.'
-      );
+      const messages = {
+        restore: 'Se está restaurando un backup de este servidor; espera a que termine.',
+        update: 'Se está actualizando la versión de este servidor; espera a que termine.',
+        backup: 'Ya se está haciendo un backup de este servidor; espera a que termine.',
+      };
+      throw new Error(messages[current] || messages.backup);
     }
     backupJobs.set(serverId, kind);
     try {
@@ -212,8 +214,13 @@ function createAppCore({ send, notify, minuteMs = 60 * 1000 }) {
    * automático (que no viene de un clic del usuario).
    */
   function launchServer(server) {
-    if (backupJobs.get(server.id) === 'restore') {
-      throw new Error('Se está restaurando un backup de este servidor; espera a que termine para encenderlo.');
+    const job = backupJobs.get(server.id);
+    if (job === 'restore' || job === 'update') {
+      throw new Error(
+        job === 'update'
+          ? 'Se está actualizando la versión de este servidor; espera a que termine para encenderlo.'
+          : 'Se está restaurando un backup de este servidor; espera a que termine para encenderlo.'
+      );
     }
     javaProcess.startServer(server, {
       onLog: (line) => {
@@ -539,6 +546,53 @@ function createAppCore({ send, notify, minuteMs = 60 * 1000 }) {
         }
         return { ok: true, results, warnings, isServerModsFolder, curseforge: curseforge.publicInfo().configured };
       } catch (err) {
+        return { ok: false, error: err.message };
+      }
+    },
+
+    // ---------- Actualizar versión (Forge/NeoForge dentro de la misma MC; Vanilla a una MC más nueva) ----------
+    'servers:versionInfo': async (id) => {
+      try {
+        return { ok: true, ...(await loaderUpdater.getUpdateInfo(requireServer(id))) };
+      } catch (err) {
+        return { ok: false, error: err.message };
+      }
+    },
+
+    'servers:updateVersion': async ({ id, version }, ctx) => {
+      const progress = (info) => ctx && ctx.reply && ctx.reply(`servers:updateProgress:${id}`, info);
+      const log = (text) => {
+        progress({ phase: 'log', text });
+        send(`servers:log:${id}`, text);
+      };
+      try {
+        const server = requireServer(id);
+        if (javaProcess.isRunning(id)) throw new Error('Detén el servidor antes de actualizarlo.');
+        if (server.loader !== 'vanilla') {
+          const java = serverManager.checkJava();
+          if (!java.ok) throw new Error(java.message);
+        }
+        const result = await runBackupJob(id, 'update', async () => {
+          if (javaProcess.isRunning(id)) throw new Error('Detén el servidor antes de actualizarlo.');
+          // 1) Backup completo, por si hay que volver atrás
+          log('\n[Actualizar versión] Haciendo un backup completo antes de tocar nada…\n');
+          const backup = await backupManager.createFullBackup(server, {
+            onProgress: (info) => progress({ phase: 'backup', ...info }),
+          });
+          log(`[Actualizar versión] Backup completo guardado: ${backup.fileName}\n`);
+          // 2) Cambiar la versión
+          const fields = await loaderUpdater.updateServerVersion(server, version, {
+            onLog: log,
+            onProgress: (info) => progress(info),
+          });
+          const saved = { ...store.getServer(id), ...fields };
+          store.saveServer(saved);
+          return { server: saved, backupFileName: backup.fileName };
+        });
+        progress({ phase: 'done' });
+        return { ok: true, ...result };
+      } catch (err) {
+        log(`[Actualizar versión] Error: ${err.message}\n`);
         return { ok: false, error: err.message };
       }
     },

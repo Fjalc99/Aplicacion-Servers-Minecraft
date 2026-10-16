@@ -838,3 +838,12 @@ input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--accent);
 .mod-file { font-size: 11px; }
 .mods-table a, .mods-note a { color: var(--accent-strong); text-decoration: none; }
 .mods-table a:hover, .mods-note a:hover { text-decoration: underline; }
+
+/* Actualizar versión */
+.version-log {
+  max-height: 220px; overflow: auto; margin: 10px 0 0; padding: 10px;
+  background: var(--surface-2, #23272f); border: 1px solid var(--border, #2f333e); border-radius: 8px;
+  font-size: 11px; line-height: 1.45; white-space: pre-wrap; word-break: break-word; color: var(--text-muted, #8a90a0);
+}
+.settings-status.warn { color: var(--accent-strong, #f2ab5c); }
+#versionSelect { min-width: 260px; flex: 1; }

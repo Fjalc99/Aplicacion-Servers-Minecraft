@@ -141,3 +141,38 @@ test('mods:analyze sobre la carpeta mods del propio servidor: no compara consigo
     global.fetch = originalFetch;
   }
 });
+
+test('actualizar versión: hace backup completo antes, guarda la versión y no deja encender mientras tanto', async () => {
+  const loaderUpdater = require('../src/loaderUpdater');
+  const original = loaderUpdater.updateServerVersion;
+  const core = newCore();
+  const server = makeServer('actualizar');
+  store.saveServer({ ...store.getServer(server.id), loader: 'vanilla' }); // sin depender de tener Java
+  let release;
+  loaderUpdater.updateServerVersion = async (srv, version, { onLog }) => {
+    onLog('instalando…\n');
+    await new Promise((r) => (release = r));
+    return { mcVersion: version };
+  };
+  try {
+    const events = [];
+    const pending = core.handlers['servers:updateVersion']({ id: server.id, version: '1.21.4' }, { reply: (ch, p) => events.push([ch, p.phase]) });
+    await new Promise((r) => setTimeout(r, 50));
+    assert.throws(() => core.handlers['servers:start'](server.id, ctx), /actualizando la versión/);
+    release();
+    const result = await pending;
+    assert.equal(result.ok, true, result.error);
+    assert.match(result.backupFileName, /^completo-/);
+    assert.ok(fs.existsSync(path.join(server.dir, 'backups', result.backupFileName)));
+    assert.equal(store.getServer(server.id).mcVersion, '1.21.4');
+    assert.ok(events.some(([ch, phase]) => ch === `servers:updateProgress:${server.id}` && phase === 'backup'));
+    assert.ok(events.some(([, phase]) => phase === 'done'));
+
+    running = true;
+    const refused = await core.handlers['servers:updateVersion']({ id: server.id, version: '1.21.5' }, ctx);
+    assert.equal(refused.ok, false);
+    assert.match(refused.error, /Detén el servidor/);
+  } finally {
+    loaderUpdater.updateServerVersion = original;
+  }
+});

@@ -318,6 +318,7 @@ src/
   modAnalyzer.js             Análisis de mods (Modrinth → CurseForge → ficha del .jar), copiado y diff
   curseforge.js              Fingerprint y API de CurseForge (clave guardada solo en este PC)
   clientSync.js              Comparar los mods de un cliente con los del servidor y arreglarlo
+  loaderUpdater.js           Ver y cambiar la versión de Forge/NeoForge/Vanilla de un servidor
   zipWriter.js                ZIP sin dependencias: escribe directo a disco, ZIP64 (>4 GB) y extracción segura
   backupManager.js            Backups del mundo y completos: crear, listar, restaurar y borrar
   crashDiagnostics.js          Traduce el log de una caída a un mensaje en español
@@ -429,6 +430,25 @@ automáticos:
 - Al detener el servidor (se hace justo después de que el proceso termine de
   guardar el mundo por sí mismo, para no pillarlo a medio guardar).
 - Cada X horas mientras el servidor está en marcha (0 = desactivado).
+
+### Actualizar la versión del servidor
+
+Pestaña **Configuración** → tarjeta "Versión del servidor". Muestra la versión que
+hay instalada de verdad (la lee de `run.bat`/`run.sh` y de `libraries/`, así que
+también funciona con servidores importados) y avisa si hay una más nueva.
+
+- **Forge / NeoForge**: cambia la versión del loader **sin cambiar la de Minecraft**
+  (p. ej. NeoForge 21.1.77 → 21.1.209 para la 1.21.1), así los mods siguen
+  funcionando. Descarga el instalador oficial y lo ejecuta sobre la carpeta del
+  servidor. Se pueden elegir también versiones anteriores o betas (avisa).
+- **Vanilla**: sube a una versión más nueva de Minecraft. El mundo se convierte al
+  arrancar y ya no se abre con la versión anterior.
+- Antes de tocar nada hace un **backup completo** automáticamente; si algo va mal,
+  se restaura desde Resumen → Copias de seguridad.
+- El servidor tiene que estar apagado, y no se puede encender mientras se actualiza.
+
+Pasar un servidor con mods a otra versión de Minecraft no se ofrece (los mods son
+de una versión concreta): crea uno nuevo con "Usar como plantilla".
 
 ### Reinicio automático si el servidor se cae solo
 

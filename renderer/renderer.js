@@ -1137,6 +1137,143 @@ async function refreshBackupsList(server) {
 // Configuración
 // ---------------------------------------------------------------------------
 
+const LOADER_LABEL = { vanilla: 'Minecraft', forge: 'Forge', neoforge: 'NeoForge' };
+
+/** Tarjeta "Versión del servidor": ver la versión instalada y cambiarla. */
+async function renderVersionCard(server) {
+  const card = document.getElementById('versionCard');
+  if (!card) return;
+  const label = LOADER_LABEL[server.loader] || server.loader;
+  let info;
+  try {
+    info = await window.api.getVersionInfo(server.id);
+  } catch (error) {
+    info = { ok: false, error: error.message };
+  }
+  if (!document.body.contains(card)) return; // se cambió de pestaña mientras tanto
+  if (!info.ok) {
+    card.innerHTML = `<h3>Versión del servidor</h3><p class="error-text">No se pudieron consultar las versiones: ${escapeHtml(info.error)}</p>`;
+    return;
+  }
+
+  const isVanilla = info.loader === 'vanilla';
+  const currentText = isVanilla
+    ? `Minecraft <strong>${escapeHtml(info.current)}</strong>`
+    : `${label} <strong>${escapeHtml(info.current || 'desconocida')}</strong> · Minecraft ${escapeHtml(info.mcVersion)}`;
+
+  const options = info.versions
+    .filter((v) => v.version !== info.current)
+    .map((v) => {
+      const tags = [
+        v.version === info.latest ? 'última' : null,
+        v.recommended ? 'recomendada' : null,
+        v.prerelease ? 'beta' : null,
+        !v.newer ? 'anterior' : null,
+      ].filter(Boolean);
+      const selected = v.version === info.latest ? ' selected' : '';
+      return `<option value="${escapeHtml(v.version)}"${selected}>${escapeHtml(v.version)}${tags.length ? ` (${tags.join(', ')})` : ''}</option>`;
+    })
+    .join('');
+
+  let status;
+  if (info.upToDate) status = '<span class="settings-status good">✓ Estás en la última versión.</span>';
+  else if (info.unknownCurrent) status = '<span class="hint">No he podido saber qué versión exacta tiene instalada.</span>';
+  else if (info.latest) status = `<span class="settings-status warn">Hay una versión más nueva: ${escapeHtml(info.latest)}</span>`;
+  else status = '';
+
+  const explain = isVanilla
+    ? 'Sube el servidor a una versión más nueva de Minecraft. El mundo se convierte al arrancar y <strong>no se puede volver a una versión anterior</strong> (salvo restaurando el backup).'
+    : `Cambia la versión de ${label} sin cambiar la de Minecraft (${escapeHtml(info.mcVersion)}), así tus mods siguen funcionando. Conviene mirar antes si algún mod pide una versión concreta. Para pasar a otra versión de Minecraft, crea un servidor nuevo con "Usar como plantilla".`;
+
+  card.innerHTML = `
+    <h3>Versión del servidor</h3>
+    <p style="margin:0 0 6px;">${currentText}</p>
+    <p class="settings-line" style="margin:0 0 10px;">${status}</p>
+    <p class="hint" style="margin-top:0;">${explain} Antes de cambiar nada se hace un <strong>backup completo</strong> automáticamente.</p>
+    ${options ? `
+    <div class="settings-actions">
+      <select id="versionSelect" aria-label="Versión a instalar">${options}</select>
+      <button id="versionUpdateBtn" type="button" class="btn btn-accent">${isVanilla ? 'Actualizar Minecraft' : `Cambiar versión de ${label}`}</button>
+    </div>` : '<p class="hint">No hay otras versiones disponibles.</p>'}
+    <div id="versionProgress" class="hint" style="margin-top:10px;"></div>
+    <pre id="versionLog" class="version-log" hidden></pre>
+  `;
+
+  const btn = document.getElementById('versionUpdateBtn');
+  if (!btn) return;
+  btn.addEventListener('click', async () => {
+    const target = document.getElementById('versionSelect').value;
+    if (await window.api.isRunning(server.id)) {
+      alert('Detén el servidor antes de cambiar su versión.');
+      return;
+    }
+    const chosen = info.versions.find((v) => v.version === target) || {};
+    const lines = [
+      isVanilla
+        ? `Se actualizará el servidor de Minecraft ${info.current} a ${target}.`
+        : `Se cambiará ${label} de ${info.current || 'la versión actual'} a ${target} (Minecraft ${info.mcVersion}).`,
+      '',
+      'Antes se hará un backup completo (puede tardar unos minutos con muchos mods).',
+    ];
+    if (isVanilla) lines.push('', 'Al arrancar, el mundo se convertirá a la nueva versión y ya no podrá abrirse con la anterior.');
+    if (chosen.newer === false) lines.push('', 'Ojo: es una versión ANTERIOR a la que tienes. Algunos mods pueden no funcionar.');
+    if (chosen.prerelease) lines.push('', 'Ojo: es una versión beta.');
+    lines.push('', '¿Continuar?');
+    if (!confirm(lines.join('\n'))) return;
+
+    const progressEl = document.getElementById('versionProgress');
+    const logEl = document.getElementById('versionLog');
+    btn.disabled = true;
+    document.getElementById('versionSelect').disabled = true;
+    logEl.hidden = false;
+    logEl.textContent = '';
+    progressEl.innerHTML = progressPlaceholder('Haciendo backup completo…');
+    const startTime = Date.now();
+    let phase = 'backup';
+
+    window.api.onUpdateProgress(server.id, (p) => {
+      if (p.phase === 'backup') {
+        renderProgressBar(progressEl, p, startTime);
+      } else if (p.phase === 'download') {
+        if (phase !== 'download') phase = 'download';
+        const pct = p.total ? Math.round((p.received / p.total) * 100) : null;
+        progressEl.textContent = pct !== null ? `Descargando… ${pct}%` : `Descargando… ${(p.received / 1024 / 1024).toFixed(1)} MB`;
+      } else if (p.phase === 'install') {
+        phase = 'install';
+        progressEl.textContent = 'Instalando (descarga librerías; puede tardar un par de minutos)…';
+      } else if (p.phase === 'log' && p.text) {
+        logEl.textContent = (logEl.textContent + p.text).slice(-20000);
+        logEl.scrollTop = logEl.scrollHeight;
+      }
+    });
+
+    try {
+      const result = await window.api.updateVersion(server.id, target);
+      if (!result.ok) {
+        progressEl.innerHTML = `<span class="error-text">No se pudo actualizar: ${escapeHtml(result.error)}</span><br><span class="hint">Si se llegó a tocar algo, tienes el backup completo en la pestaña Resumen → Copias de seguridad.</span>`;
+        return;
+      }
+      const i = state.servers.findIndex((s) => s.id === server.id);
+      if (i !== -1) state.servers[i] = { ...state.servers[i], ...result.server };
+      Object.assign(server, result.server);
+      renderSidebar();
+      await renderVersionCard(server);
+      const done = document.getElementById('versionProgress');
+      if (done) {
+        done.innerHTML = `<span class="settings-status good">✓ Actualizado a ${escapeHtml(target)}.</span> Backup previo: <code>${escapeHtml(result.backupFileName)}</code>. Ya puedes iniciar el servidor; la primera vez tarda un poco más.`;
+      }
+    } catch (error) {
+      progressEl.innerHTML = `<span class="error-text">Error: ${escapeHtml(error.message)}</span>`;
+    } finally {
+      window.api.removeUpdateProgressListeners(server.id);
+      const b = document.getElementById('versionUpdateBtn');
+      if (b) b.disabled = false;
+      const sel = document.getElementById('versionSelect');
+      if (sel) sel.disabled = false;
+    }
+  });
+}
+
 async function renderConfig(server) {
   const p = server.properties;
   const el = document.getElementById('tab-config');
@@ -1144,6 +1281,10 @@ async function renderConfig(server) {
   const recommendedMax = Math.floor((sysMem.totalMb * 0.7) / 256) * 256;
 
   el.innerHTML = `
+    <div class="card" id="versionCard">
+      <h3>Versión del servidor</h3>
+      <p class="hint">Consultando versiones disponibles…</p>
+    </div>
     <div class="card">
       <h3>Memoria del proceso Java</h3>
       <div class="form-grid">
@@ -1249,6 +1390,8 @@ async function renderConfig(server) {
       <span id="cfgSaved" class="hint" style="margin-left:10px;"></span>
     </div>
   `;
+
+  renderVersionCard(server);
 
   document.getElementById('cfgOptimizeJvm').addEventListener('change', async (e) => {
     try {
