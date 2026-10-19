@@ -283,6 +283,23 @@ Notas:
 - Puedes compilar el instalador de Windows desde Windows o desde Linux/Mac. Para
   `.dmg` sí necesitas compilar en macOS.
 
+### Jugar el mundo del servidor como partida local
+
+Pestaña **Resumen → Mundo → "Jugar este mundo como partida local"** (solo administrador).
+
+- **Exportar a partida local**: copia el mundo a la carpeta `saves` de tu Minecraft
+  (detecta solas las instancias de CurseForge, Modrinth, Prism y `.minecraft`). Te
+  pone tu inventario y tu posición donde los lee el modo un jugador (en un servidor
+  están en `playerdata/<uuid>.dat`; en local, dentro de `level.dat`), la dificultad
+  del servidor y los trucos si eres OP. Opcionalmente copia la configuración de mods
+  del servidor (nunca los archivos `*client*`; lo que sustituye lo guarda en
+  `config-antes-<fecha>`). Ideal para jugar solo o abrir la partida con e4mc.
+- **Traer partida local al servidor**: lo contrario. Vuelve a poner tu inventario en
+  `playerdata`, guarda aparte el mundo que había y avisa si en el servidor se ha
+  jugado después de exportar (para no perderlo sin querer).
+
+No juguéis a la vez en las dos copias: luego no se pueden juntar.
+
 ## Limitaciones conocidas
 
 - **Lado cliente/servidor de los mods de CurseForge.** Muchos autores no marcan sus
@@ -319,6 +336,8 @@ src/
   curseforge.js              Fingerprint y API de CurseForge (clave guardada solo en este PC)
   clientSync.js              Comparar los mods de un cliente con los del servidor y arreglarlo
   loaderUpdater.js           Ver y cambiar la versión de Forge/NeoForge/Vanilla de un servidor
+  localWorld.js              Exportar el mundo a partida local (un jugador) y traerlo de vuelta
+  nbt.js                     Lector/escritor de NBT (level.dat, playerdata)
   zipWriter.js                ZIP sin dependencias: escribe directo a disco, ZIP64 (>4 GB) y extracción segura
   backupManager.js            Backups del mundo y completos: crear, listar, restaurar y borrar
   crashDiagnostics.js          Traduce el log de una caída a un mensaje en español

@@ -847,3 +847,9 @@ input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--accent);
 }
 .settings-status.warn { color: var(--accent-strong, #f2ab5c); }
 #versionSelect { min-width: 260px; flex: 1; }
+
+/* Partida local */
+.world-local { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--border, #2f333e); }
+.world-local h4 { margin: 0 0 6px; font-size: 14px; }
+.local-panel { margin-top: 12px; padding: 14px; border: 1px solid var(--border, #2f333e); border-radius: 10px; background: var(--surface-2, #23272f); }
+.local-panel select, .local-panel input[type="text"] { width: 100%; }

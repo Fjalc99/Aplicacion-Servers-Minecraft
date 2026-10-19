@@ -22,6 +22,11 @@ contextBridge.exposeInMainWorld('api', {
   // Importar servidor / mundo existentes
   pickServerFolder: () => ipcRenderer.invoke('servers:pickImportFolder'),
   pickWorldFolder: () => ipcRenderer.invoke('worlds:pickFolder'),
+  pickInstanceFolder: () => ipcRenderer.invoke('worlds:pickInstanceFolder'),
+  getLocalWorldInfo: (serverId) => ipcRenderer.invoke('worlds:localInfo', { serverId }),
+  listLocalSaves: (instanceDir) => ipcRenderer.invoke('worlds:listSaves', { instanceDir }),
+  exportWorldToLocal: (serverId, options) => ipcRenderer.invoke('worlds:exportToLocal', { serverId, ...options }),
+  importWorldFromLocal: (serverId, options) => ipcRenderer.invoke('worlds:importFromLocal', { serverId, ...options }),
   detectExistingServer: (folderPath) => ipcRenderer.invoke('servers:detectExisting', folderPath),
   importServer: (options) => ipcRenderer.invoke('servers:import', options),
   importWorld: (serverId, worldFolder) => ipcRenderer.invoke('servers:importWorld', { serverId, worldFolder }),

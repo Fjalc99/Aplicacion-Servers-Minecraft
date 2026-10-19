@@ -905,6 +905,15 @@ function renderOverview(server) {
       <p class="hint" style="margin-top:0;">Carpeta actual: <strong>${escapeHtml(server.properties['level-name'] || 'world')}</strong>. Importar un mundo sustituye el actual si existe.</p>
       <button id="importWorldBtn" class="btn btn-accent">Importar mundo desde carpeta</button>
       <div id="importWorldMsg" class="hint" style="margin-top:8px;"></div>
+      <div class="world-local">
+        <h4>Jugar este mundo como partida local</h4>
+        <p class="hint" style="margin-top:0;">Copia el mundo a tu Minecraft como partida de un jugador (para jugar solo o abrirla con e4mc), con tu inventario, tu posición y la configuración de los mods. Luego puedes traerla de vuelta al servidor. No juguéis a la vez en las dos copias.</p>
+        <div class="backup-actions">
+          <button id="exportLocalBtn" class="btn btn-ghost">Exportar a partida local</button>
+          <button id="importLocalBtn" class="btn btn-ghost">Traer partida local al servidor</button>
+        </div>
+        <div id="localWorldPanel"></div>
+      </div>
     </div>
     <div class="card">
       <h3>Copias de seguridad</h3>
@@ -934,6 +943,9 @@ function renderOverview(server) {
 
   document.getElementById('backupNowBtn').addEventListener('click', () => runBackup(server, 'world'));
   document.getElementById('fullBackupBtn').addEventListener('click', () => runBackup(server, 'full'));
+
+  document.getElementById('exportLocalBtn').addEventListener('click', () => openLocalWorldPanel(server, 'export'));
+  document.getElementById('importLocalBtn').addEventListener('click', () => openLocalWorldPanel(server, 'import'));
 
   document.getElementById('importWorldBtn').addEventListener('click', async () => {
     const folder = await window.api.pickWorldFolder();
@@ -1009,6 +1021,197 @@ async function runBackup(server, kind) {
     setBackupButtonsDisabled(false);
     refreshBackupsList(server);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Partida local (un jugador) <-> servidor
+// ---------------------------------------------------------------------------
+
+async function openLocalWorldPanel(server, mode) {
+  const panel = document.getElementById('localWorldPanel');
+  panel.innerHTML = '<p class="hint">Buscando tus instancias de Minecraft…</p>';
+  let info;
+  try {
+    info = await window.api.getLocalWorldInfo(server.id);
+  } catch (error) {
+    info = { ok: false, error: error.message };
+  }
+  if (!info.ok) {
+    panel.innerHTML = `<p class="error-text">${escapeHtml(info.error)}</p>`;
+    return;
+  }
+  const isExport = mode === 'export';
+  if (info.players.length === 0) {
+    panel.innerHTML = '<p class="error-text">Este mundo todavía no tiene datos de ningún jugador: entra al menos una vez al servidor antes.</p>';
+    return;
+  }
+
+  const instanceOptions = info.instances
+    .map((i) => `<option value="${escapeHtml(i.path)}">${escapeHtml(i.label)}${i.mods ? ` · ${i.mods} mods` : ''}</option>`)
+    .join('');
+  const playerOptions = info.players
+    .map((p) => `<option value="${escapeHtml(p.uuid)}">${escapeHtml(p.name)}${p.op ? ' (OP)' : ''}</option>`)
+    .join('');
+
+  panel.innerHTML = `
+    <div class="local-panel">
+      <div class="form-grid">
+        <div class="field">
+          <label for="lwInstance">Tu Minecraft (instancia)</label>
+          <select id="lwInstance">${instanceOptions}<option value="__otra">Otra carpeta…</option></select>
+        </div>
+        <div class="field">
+          <label for="lwPlayer">Tú eres</label>
+          <select id="lwPlayer">${playerOptions}</select>
+        </div>
+        ${isExport
+          ? `<div class="field">
+               <label for="lwName">Nombre de la partida</label>
+               <input type="text" id="lwName" value="${escapeHtml(server.name)}" maxlength="60" />
+             </div>`
+          : `<div class="field">
+               <label for="lwSave">Partida a traer</label>
+               <select id="lwSave"><option value="">Cargando…</option></select>
+             </div>`}
+      </div>
+      ${isExport ? `
+      <div class="field field-inline" style="margin-top:10px;">
+        <input type="checkbox" id="lwConfig" checked />
+        <label for="lwConfig">Copiar también la configuración de los mods del servidor (tus archivos de cliente no se tocan y los que se sustituyen se guardan aparte)</label>
+      </div>` : ''}
+      <div class="backup-actions" style="margin-top:12px;">
+        <button id="lwGo" class="btn btn-accent">${isExport ? 'Exportar' : 'Traer al servidor'}</button>
+        <button id="lwCancel" class="btn btn-ghost">Cancelar</button>
+      </div>
+      <div id="lwResult" class="hint" style="margin-top:10px;"></div>
+    </div>`;
+
+  const instanceSel = document.getElementById('lwInstance');
+  const result = document.getElementById('lwResult');
+  let lastInstance = instanceSel.value;
+  document.getElementById('lwCancel').addEventListener('click', () => { panel.innerHTML = ''; });
+
+  async function loadSaves() {
+    const saveSel = document.getElementById('lwSave');
+    if (!saveSel || instanceSel.value === '__otra') return;
+    saveSel.innerHTML = '<option value="">Cargando…</option>';
+    const res = await window.api.listLocalSaves(instanceSel.value).catch((e) => ({ ok: false, error: e.message }));
+    if (!res.ok) {
+      saveSel.innerHTML = '<option value="">—</option>';
+      result.innerHTML = `<span class="error-text">${escapeHtml(res.error)}</span>`;
+      return;
+    }
+    result.textContent = '';
+    if (res.saves.length === 0) {
+      saveSel.innerHTML = '<option value="">No hay partidas en esa instancia</option>';
+      return;
+    }
+    saveSel.innerHTML = res.saves
+      .map((sv) => {
+        const from = sv.exported
+          ? ` · exportada de "${sv.exported.serverName}" el ${new Date(sv.exported.exportedAt).toLocaleString()}`
+          : '';
+        return `<option value="${escapeHtml(sv.folder)}" data-uuid="${escapeHtml((sv.exported && sv.exported.uuid) || '')}">${escapeHtml(sv.name)}${escapeHtml(from)}</option>`;
+      })
+      .join('');
+    const syncPlayer = () => {
+      const uuid = saveSel.selectedOptions[0] && saveSel.selectedOptions[0].dataset.uuid;
+      if (uuid && [...document.getElementById('lwPlayer').options].some((o) => o.value === uuid)) {
+        document.getElementById('lwPlayer').value = uuid;
+      }
+    };
+    saveSel.onchange = syncPlayer;
+    syncPlayer();
+  }
+
+  instanceSel.addEventListener('change', async () => {
+    if (instanceSel.value === '__otra') {
+      const folder = await window.api.pickInstanceFolder();
+      if (!folder) {
+        instanceSel.value = lastInstance;
+        return;
+      }
+      const option = document.createElement('option');
+      option.value = folder;
+      option.textContent = folder;
+      instanceSel.insertBefore(option, instanceSel.lastElementChild);
+      instanceSel.value = folder;
+    }
+    lastInstance = instanceSel.value;
+    loadSaves();
+  });
+  if (!instanceOptions) {
+    result.innerHTML = 'No he encontrado tu Minecraft automáticamente: elige "Otra carpeta…" y busca la de tu instancia (la que tiene dentro <code>mods</code> y <code>saves</code>).';
+    instanceSel.value = '__otra';
+  } else if (!isExport) {
+    loadSaves();
+  }
+
+  const go = document.getElementById('lwGo');
+  go.addEventListener('click', async () => {
+    const instanceDir = instanceSel.value;
+    if (!instanceDir || instanceDir === '__otra') {
+      result.innerHTML = '<span class="error-text">Elige la carpeta de tu Minecraft.</span>';
+      return;
+    }
+    const uuid = document.getElementById('lwPlayer').value;
+    go.disabled = true;
+    try {
+      if (isExport) {
+        result.textContent = 'Copiando el mundo… (si el servidor está encendido, se pausa el guardado mientras tanto)';
+        const res = await window.api.exportWorldToLocal(server.id, {
+          instanceDir,
+          uuid,
+          saveName: document.getElementById('lwName').value,
+          copyConfig: document.getElementById('lwConfig').checked,
+        });
+        if (!res.ok) {
+          result.innerHTML = `<span class="error-text">${escapeHtml(res.error)}</span>`;
+          return;
+        }
+        let html = `<span class="settings-status good">✓ Hecho.</span> En Minecraft → <strong>Un jugador</strong> verás la partida <strong>${escapeHtml(res.saveFolder)}</strong>.`;
+        html += res.playerApplied ? ' Apareces con tu inventario y en tu sitio.' : ' (No había datos de ese jugador: aparecerás en el spawn.)';
+        if (res.config) {
+          html += `<br>Configuración de mods: ${res.config.copied} nuevos, ${res.config.replaced} sustituidos.`;
+          if (res.config.backupDir) html += ` Los tuyos están en <code>${escapeHtml(res.config.backupDir)}</code>.`;
+        }
+        html += '<br>Recuerda: si jugáis en local, no juguéis a la vez en el servidor; cuando acabéis, usa "Traer partida local al servidor".';
+        result.innerHTML = html;
+      } else {
+        const saveFolder = document.getElementById('lwSave').value;
+        if (!saveFolder) {
+          result.innerHTML = '<span class="error-text">Elige qué partida traer.</span>';
+          return;
+        }
+        if (await window.api.isRunning(server.id)) {
+          result.innerHTML = '<span class="error-text">Detén el servidor antes de traer la partida.</span>';
+          return;
+        }
+        if (!confirm('El mundo del servidor se sustituirá por esa partida. El mundo actual no se borra: se guarda aparte. Cierra Minecraft antes. ¿Continuar?')) return;
+        result.textContent = 'Copiando la partida al servidor…';
+        let res = await window.api.importWorldFromLocal(server.id, { instanceDir, saveFolder, uuid });
+        if (res.ok && res.needsConfirm) {
+          if (!confirm(`${res.reason}\n\n¿Traerla igualmente?`)) {
+            result.textContent = 'Cancelado; no se ha tocado nada.';
+            return;
+          }
+          res = await window.api.importWorldFromLocal(server.id, { instanceDir, saveFolder, uuid, force: true });
+        }
+        if (!res.ok) {
+          result.innerHTML = `<span class="error-text">${escapeHtml(res.error)}</span>`;
+          return;
+        }
+        let html = '<span class="settings-status good">✓ La partida ya es el mundo del servidor.</span>';
+        html += res.playerRestored ? ' Tu inventario y tu posición están en su sitio.' : '';
+        if (res.previousWorldSavedAs) html += `<br>El mundo anterior está guardado como <code>${escapeHtml(res.previousWorldSavedAs)}</code> en la carpeta del servidor.`;
+        result.innerHTML = html;
+      }
+    } catch (error) {
+      result.innerHTML = `<span class="error-text">${escapeHtml(error.message)}</span>`;
+    } finally {
+      go.disabled = false;
+    }
+  });
 }
 
 async function refreshBackupsList(server) {

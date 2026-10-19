@@ -218,6 +218,9 @@ async function pickFolder(title) {
 
 ipcMain.handle('servers:pickImportFolder', () => pickFolder('Selecciona la carpeta del servidor existente'));
 ipcMain.handle('worlds:pickFolder', () => pickFolder('Selecciona la carpeta del mundo'));
+ipcMain.handle('worlds:pickInstanceFolder', () =>
+  pickFolder('Selecciona la carpeta de tu Minecraft (la de la instancia, que tiene dentro "mods" y "saves")')
+);
 ipcMain.handle('mods:pickFolder', () => pickFolder('Selecciona la carpeta de mods del cliente'));
 
 ipcMain.handle('servers:openFolder', (e, id) => {

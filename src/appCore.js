@@ -17,6 +17,7 @@ const playit = require('./playit');
 const curseforge = require('./curseforge');
 const clientSync = require('./clientSync');
 const loaderUpdater = require('./loaderUpdater');
+const localWorld = require('./localWorld');
 
 /** Primera IPv4 de la red local (la que usan los que están en tu misma WiFi). */
 function lanIpv4() {
@@ -593,6 +594,50 @@ function createAppCore({ send, notify, minuteMs = 60 * 1000 }) {
         return { ok: true, ...result };
       } catch (err) {
         log(`[Actualizar versión] Error: ${err.message}\n`);
+        return { ok: false, error: err.message };
+      }
+    },
+
+    // ---------- Partida local (un jugador) <-> servidor ----------
+    'worlds:localInfo': ({ serverId }) => {
+      try {
+        const server = requireServer(serverId);
+        return { ok: true, instances: localWorld.detectInstances(), players: localWorld.listPlayers(server) };
+      } catch (err) {
+        return { ok: false, error: err.message };
+      }
+    },
+
+    'worlds:listSaves': ({ instanceDir }) => {
+      try {
+        return { ok: true, saves: localWorld.listSaves(instanceDir) };
+      } catch (err) {
+        return { ok: false, error: err.message };
+      }
+    },
+
+    'worlds:exportToLocal': async ({ serverId, instanceDir, uuid, saveName, copyConfig }) => {
+      try {
+        const server = requireServer(serverId);
+        const result = await runBackupJob(serverId, 'backup', () =>
+          withSavesPaused(server, async () => localWorld.exportToLocal(server, { instanceDir, uuid, saveName, copyConfig }))
+        );
+        return { ok: true, ...result };
+      } catch (err) {
+        return { ok: false, error: err.message };
+      }
+    },
+
+    'worlds:importFromLocal': async ({ serverId, instanceDir, saveFolder, uuid, force }) => {
+      try {
+        const server = requireServer(serverId);
+        if (javaProcess.isRunning(serverId)) throw new Error('Detén el servidor antes de traer la partida.');
+        const result = await runBackupJob(serverId, 'restore', async () => {
+          if (javaProcess.isRunning(serverId)) throw new Error('Detén el servidor antes de traer la partida.');
+          return localWorld.importFromLocal(server, { instanceDir, saveFolder, uuid, force });
+        });
+        return { ok: true, ...result };
+      } catch (err) {
         return { ok: false, error: err.message };
       }
     },
