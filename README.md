@@ -134,6 +134,24 @@ que se quita o se sustituye se mueve a `mods-quitados-<fecha>`, junto a tu carpe
 **"ZIP con los mods que necesita un cliente"** genera el pack para tus amigos: todos
 los mods del servidor que hacen falta en el cliente, en la versión del servidor.
 
+#### Actualizar los mods del servidor
+
+Botón **"Buscar actualizaciones de mods"** (y aviso automático al abrir la pestaña,
+como mucho una vez por hora). Para cada mod del servidor busca la última versión
+del **mismo loader y la misma versión de Minecraft**: en Modrinth por hash y, si
+tienes clave, en CurseForge por fingerprint. Por defecto solo versiones estables
+(casilla para incluir betas).
+
+- Avisa si una versión nueva **necesita otro mod** que no tienes.
+- Algunos autores de CurseForge no permiten descargas desde otras apps: esos salen
+  marcados para bajarlos a mano.
+- Al actualizar (con el servidor apagado): backup completo opcional, descarga, se
+  comprueba el hash con el publicado y la versión vieja se mueve a
+  `mods-antiguos-<fecha>/`. La app decide qué descargar consultando ella misma a
+  Modrinth/CurseForge; la interfaz nunca le pasa URLs.
+- Después, tus amigos tienen que tener las mismas versiones: "Comparar mi cliente con
+  este servidor" o el ZIP de cliente.
+
 #### Clave de CurseForge (opcional)
 
 1. Entra en [console.curseforge.com](https://console.curseforge.com), inicia sesión y ve a **API keys**.
@@ -336,6 +354,7 @@ src/
   curseforge.js              Fingerprint y API de CurseForge (clave guardada solo en este PC)
   clientSync.js              Comparar los mods de un cliente con los del servidor y arreglarlo
   loaderUpdater.js           Ver y cambiar la versión de Forge/NeoForge/Vanilla de un servidor
+  modUpdater.js              Buscar y aplicar actualizaciones de mods (Modrinth + CurseForge)
   localWorld.js              Exportar el mundo a partida local (un jugador) y traerlo de vuelta
   nbt.js                     Lector/escritor de NBT (level.dat, playerdata)
   zipWriter.js                ZIP sin dependencias: escribe directo a disco, ZIP64 (>4 GB) y extracción segura

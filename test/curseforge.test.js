@@ -52,7 +52,7 @@ test('lookupFingerprints: nombre, enlace y lado de lo que reconoce; manda la cla
   const { fetchImpl, calls } = fakeCurseForge();
   const found = await curseforge.lookupFingerprints([111, 222, 333], { apiKey: 'clave-de-prueba-123456789', fetchImpl });
   assert.equal(found.size, 2);
-  assert.deepEqual(found.get(111), { modId: 5001, name: 'Mod 5001', url: 'https://www.curseforge.com/minecraft/mc-mods/mod-5001', side: 'client-only', client: true, server: false });
+  assert.deepEqual(found.get(111), { modId: 5001, name: 'Mod 5001', url: 'https://www.curseforge.com/minecraft/mc-mods/mod-5001', side: 'client-only', client: true, server: false, fileId: null, displayName: null, fileDate: null, releaseType: null });
   assert.equal(found.get(222).side, null);
   assert.equal(found.has(333), false);
   assert.ok(calls.every((c) => c.options.headers['x-api-key'] === 'clave-de-prueba-123456789'));

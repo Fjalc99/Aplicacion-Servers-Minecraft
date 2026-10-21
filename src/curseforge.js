@@ -177,6 +177,10 @@ async function lookupFingerprints(fingerprints, { apiKey = getApiKey(), fetchImp
     if (!print) continue;
     found.set(print >>> 0, {
       modId,
+      fileId: file.id || null,
+      displayName: file.displayName || null,
+      fileDate: file.fileDate || null,
+      releaseType: file.releaseType || null,
       name: (mod && mod.name) || file.displayName || null,
       url: (mod && mod.links && mod.links.websiteUrl) || (mod && mod.slug ? `https://www.curseforge.com/minecraft/mc-mods/${mod.slug}` : null),
       side: sideFromGameVersions(file.gameVersions),
@@ -186,4 +190,30 @@ async function lookupFingerprints(fingerprints, { apiKey = getApiKey(), fetchImp
   return found;
 }
 
-module.exports = { fingerprint, murmur2, getApiKey, publicInfo, setApiKey, removeApiKey, lookupFingerprints, sideFromGameVersions };
+/** Fichas de varios mods (nombre, enlace y latestFilesIndexes por versión/loader). */
+async function getMods(modIds, { apiKey = getApiKey(), fetchImpl = fetch } = {}) {
+  const out = new Map();
+  for (let i = 0; i < modIds.length; i += 500) {
+    const result = await request('/v1/mods', {
+      method: 'POST',
+      body: { modIds: modIds.slice(i, i + 500), filterPcOnly: false },
+      apiKey,
+      fetchImpl,
+    });
+    for (const mod of (result && result.data) || []) out.set(mod.id, mod);
+  }
+  return out;
+}
+
+/** Detalle de un archivo (downloadUrl, hashes, dependencias...). */
+async function getFile(modId, fileId, { apiKey = getApiKey(), fetchImpl = fetch } = {}) {
+  const result = await request(`/v1/mods/${Number(modId)}/files/${Number(fileId)}`, { apiKey, fetchImpl });
+  return result && result.data;
+}
+
+// Tipos de loader en la API de CurseForge
+const MOD_LOADER = { forge: 1, fabric: 4, quilt: 5, neoforge: 6 };
+// releaseType: 1 = release, 2 = beta, 3 = alpha
+const RELEASE_TYPE = { 1: 'release', 2: 'beta', 3: 'alpha' };
+
+module.exports = { getMods, getFile, MOD_LOADER, RELEASE_TYPE, fingerprint, murmur2, getApiKey, publicInfo, setApiKey, removeApiKey, lookupFingerprints, sideFromGameVersions };

@@ -18,6 +18,7 @@ const curseforge = require('./curseforge');
 const clientSync = require('./clientSync');
 const loaderUpdater = require('./loaderUpdater');
 const localWorld = require('./localWorld');
+const modUpdater = require('./modUpdater');
 
 /** Primera IPv4 de la red local (la que usan los que están en tu misma WiFi). */
 function lanIpv4() {
@@ -594,6 +595,45 @@ function createAppCore({ send, notify, minuteMs = 60 * 1000 }) {
         return { ok: true, ...result };
       } catch (err) {
         log(`[Actualizar versión] Error: ${err.message}\n`);
+        return { ok: false, error: err.message };
+      }
+    },
+
+    // ---------- Actualizar mods del servidor (Modrinth + CurseForge) ----------
+    'mods:checkUpdates': async ({ serverId, includeBeta }) => {
+      try {
+        const server = requireServer(serverId);
+        const result = await modUpdater.findUpdates(server, { includeBeta: Boolean(includeBeta) });
+        return { ok: true, ...modUpdater.publicResult(result), curseforge: curseforge.publicInfo().configured };
+      } catch (err) {
+        return { ok: false, error: err.message };
+      }
+    },
+
+    'mods:applyUpdates': async ({ serverId, fileNames, fullBackup, includeBeta }, ctx) => {
+      const progress = (info) => ctx && ctx.reply && ctx.reply(`mods:updateProgress:${serverId}`, info);
+      try {
+        const server = requireServer(serverId);
+        if (javaProcess.isRunning(serverId)) throw new Error('Detén el servidor antes de actualizar mods.');
+        if (!Array.isArray(fileNames) || fileNames.length === 0) throw new Error('No has elegido ningún mod.');
+        const result = await runBackupJob(serverId, 'update', async () => {
+          if (javaProcess.isRunning(serverId)) throw new Error('Detén el servidor antes de actualizar mods.');
+          let backupFileName = null;
+          if (fullBackup) {
+            const backup = await backupManager.createFullBackup(server, {
+              onProgress: (info) => progress({ phase: 'backup', ...info }),
+            });
+            backupFileName = backup.fileName;
+          }
+          const applied = await modUpdater.applyUpdates(server, fileNames, {
+            includeBeta: Boolean(includeBeta),
+            onProgress: (info) => progress(info),
+          });
+          return { ...applied, backupFileName };
+        });
+        progress({ phase: 'done' });
+        return { ok: true, ...result };
+      } catch (err) {
         return { ok: false, error: err.message };
       }
     },

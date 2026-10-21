@@ -104,6 +104,11 @@ contextBridge.exposeInMainWorld('api', {
   removeCurseForge: () => ipcRenderer.invoke('app:removeCurseForge'),
   analyzeMods: (folder, serverId) => ipcRenderer.invoke('mods:analyze', { folder, serverId }),
   compareClientMods: (folder, serverId) => ipcRenderer.invoke('mods:compareClient', { folder, serverId }),
+  checkModUpdates: (serverId, includeBeta) => ipcRenderer.invoke('mods:checkUpdates', { serverId, includeBeta }),
+  applyModUpdates: (serverId, fileNames, options = {}) =>
+    ipcRenderer.invoke('mods:applyUpdates', { serverId, fileNames, ...options }),
+  onModUpdateProgress: (serverId, cb) => ipcRenderer.on(`mods:updateProgress:${serverId}`, (e, info) => cb(info)),
+  removeModUpdateProgressListeners: (serverId) => ipcRenderer.removeAllListeners(`mods:updateProgress:${serverId}`),
   applyClientSync: (folder, serverId, changes) =>
     ipcRenderer.invoke('mods:applyClientSync', { folder, serverId, ...changes }),
   applyMods: (serverId, results, includeUnknown) =>

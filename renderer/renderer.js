@@ -1698,8 +1698,10 @@ function renderMods(server) {
     <div class="mods-toolbar">
       <button id="pickModsBtn" class="btn btn-accent" ${isVanilla ? 'disabled' : ''}>Preparar el servidor</button>
       <button id="compareClientBtn" class="btn btn-ghost" ${isVanilla ? 'disabled' : ''}>Comparar mi cliente con este servidor</button>
+      <button id="modUpdatesBtn" class="btn btn-ghost" ${isVanilla ? 'disabled' : ''}>Buscar actualizaciones de mods</button>
       <span id="modsFolderLabel" class="hint"></span>
     </div>
+    <div id="modUpdatesBanner"></div>
     <div id="modsResult"></div>
   `;
   if (isVanilla) return;
@@ -1728,10 +1730,196 @@ function renderMods(server) {
     }
   });
 
+  document.getElementById('modUpdatesBtn').addEventListener('click', () => runModUpdateCheck(server, { force: true }));
+  autoCheckModUpdates(server);
+
   document.getElementById('compareClientBtn').addEventListener('click', async () => {
     const folder = await window.api.pickModsFolder();
     if (!folder) return;
     await runClientCompare(server, folder);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Actualizaciones de mods del servidor
+// ---------------------------------------------------------------------------
+
+// serverId -> { at, result }: la comprobación automática se hace como mucho una vez por hora.
+const modUpdateCache = {};
+let modUpdateIncludeBeta = false;
+
+async function autoCheckModUpdates(server) {
+  const cached = modUpdateCache[server.id];
+  let result = cached && Date.now() - cached.at < 60 * 60 * 1000 ? cached.result : null;
+  if (!result) {
+    try {
+      result = await window.api.checkModUpdates(server.id, false);
+    } catch (error) {
+      return;
+    }
+    if (!result || !result.ok) return;
+    modUpdateCache[server.id] = { at: Date.now(), result };
+  }
+  const banner = document.getElementById('modUpdatesBanner');
+  if (!banner || state.selectedId !== server.id) return;
+  if (result.updates.length > 0) {
+    banner.innerHTML = `<div class="mods-update-banner">Hay <strong>${result.updates.length}</strong> mod(s) del servidor con versión nueva para tu ${escapeHtml(LOADER_LABEL[result.loader] || result.loader)} ${escapeHtml(result.mcVersion)}. <button type="button" class="btn btn-accent btn-small" id="modUpdatesBannerBtn">Ver actualizaciones</button></div>`;
+    document.getElementById('modUpdatesBannerBtn').addEventListener('click', () => renderModUpdates(server, result));
+  } else {
+    banner.innerHTML = '';
+  }
+}
+
+async function runModUpdateCheck(server, { force = false } = {}) {
+  const resultEl = document.getElementById('modsResult');
+  const btn = document.getElementById('modUpdatesBtn');
+  document.getElementById('modsFolderLabel').textContent = '';
+  resultEl.innerHTML = '<p class="hint">Comprobando cada mod del servidor en Modrinth y CurseForge… (con muchos mods tarda un poco)</p>';
+  if (btn) btn.disabled = true;
+  try {
+    const result = await window.api.checkModUpdates(server.id, modUpdateIncludeBeta);
+    if (!result.ok) {
+      resultEl.innerHTML = `<p class="error-text">${escapeHtml(result.error)}</p>`;
+      return;
+    }
+    if (!modUpdateIncludeBeta) modUpdateCache[server.id] = { at: Date.now(), result };
+    renderModUpdates(server, result);
+  } catch (error) {
+    resultEl.innerHTML = `<p class="error-text">${escapeHtml(error.message)}</p>`;
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+function renderModUpdates(server, r) {
+  const container = document.getElementById('modsResult');
+  const banner = document.getElementById('modUpdatesBanner');
+  if (banner) banner.innerHTML = '';
+  const notes = [];
+  for (const w of r.warnings || []) {
+    if (w === 'curseforge-sin-clave') {
+      notes.push('<p class="hint mods-note">Los mods que solo están en CurseForge no se pueden comprobar sin tu clave de API: ponla en <a href="#" id="modsOpenSettings">Ajustes</a>.</p>');
+    } else {
+      notes.push(`<p class="error-text mods-note">${escapeHtml(w)}</p>`);
+    }
+  }
+  const unknown = (r.notOnModrinth || []).length;
+
+  const rows = r.updates.map((u, i) => {
+    const badges = [
+      `<span class="badge ${u.source === 'curseforge' ? 'badge-full' : 'badge-world'}">${u.source === 'curseforge' ? 'CurseForge' : 'Modrinth'}</span>`,
+      u.versionType && u.versionType !== 'release' ? `<span class="badge badge-unknown">${escapeHtml(u.versionType)}</span>` : '',
+    ].join(' ');
+    const warn = [];
+    if (u.missingDeps && u.missingDeps.length) warn.push(`<span class="error-text">Necesita también: ${u.missingDeps.map(escapeHtml).join(', ')}</span>`);
+    if (!u.canDownload) warn.push('<span class="error-text">El autor no deja descargarlo desde otras apps: bájalo a mano desde su página.</span>');
+    return `
+      <tr>
+        <td><input type="checkbox" class="modUpd" data-i="${i}" ${u.canDownload ? 'checked' : 'disabled'} /></td>
+        <td>${escapeHtml(u.name)}<br><span class="hint mod-file">${escapeHtml(u.fileName)} → ${escapeHtml(u.newFileName || '')}</span>${warn.length ? `<br>${warn.join('<br>')}` : ''}</td>
+        <td><span class="mod-file">${escapeHtml(u.currentVersion)}</span> → <strong>${escapeHtml(u.newVersion)}</strong></td>
+        <td>${badges}</td>
+        <td>${u.url ? `<a href="${escapeHtml(u.url)}" target="_blank" rel="noopener">Ver cambios</a>` : ''}</td>
+      </tr>`;
+  }).join('');
+
+  container.innerHTML = `
+    ${notes.join('')}
+    <p class="hint">Comprobados ${r.checked} mods para ${escapeHtml(LOADER_LABEL[r.loader] || r.loader)} · Minecraft ${escapeHtml(r.mcVersion)}${unknown ? ` · ${unknown} no se han podido identificar` : ''}.</p>
+    <div class="field field-inline">
+      <input type="checkbox" id="modUpdBeta" ${modUpdateIncludeBeta ? 'checked' : ''} />
+      <label for="modUpdBeta">Incluir versiones beta/alpha (por defecto solo estables)</label>
+    </div>
+    ${r.updates.length === 0
+      ? '<p class="settings-status good" style="margin-top:12px;">✓ Todos los mods que se pueden comprobar están en su última versión.</p>'
+      : `
+    <h3 style="margin-top:14px;">Con versión nueva (${r.updates.length})</h3>
+    <div class="mods-select-bar">
+      <button type="button" class="btn btn-ghost btn-small" data-select-all="modUpd">Marcar todos</button>
+      <button type="button" class="btn btn-ghost btn-small" data-select-none="modUpd">Desmarcar todos</button>
+      <span class="hint" data-count="modUpd"></span>
+    </div>
+    <table class="mods-table">
+      <thead><tr><th></th><th>Mod</th><th>Versión</th><th>Origen</th><th></th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    <div class="field field-inline" style="margin-top:12px;">
+      <input type="checkbox" id="modUpdBackup" checked />
+      <label for="modUpdBackup">Hacer un backup completo antes (recomendado: algunos mods cambian el mundo al actualizarse)</label>
+    </div>
+    <p class="hint">Las versiones viejas no se borran: se mueven a <code>mods-antiguos-&lt;fecha&gt;</code> en la carpeta del servidor. Tus amigos tendrán que tener las mismas versiones: luego usa "Comparar mi cliente con este servidor" o pásales el ZIP de cliente.</p>
+    <div class="backup-actions"><button id="modUpdApply" class="btn btn-accent">Actualizar los marcados</button></div>`}
+    <div id="modUpdResult" class="hint" style="margin-top:12px;"></div>
+  `;
+
+  const settingsLink = document.getElementById('modsOpenSettings');
+  if (settingsLink) settingsLink.addEventListener('click', (event) => { event.preventDefault(); openSettings(); });
+  document.getElementById('modUpdBeta').addEventListener('change', (e) => {
+    modUpdateIncludeBeta = e.target.checked;
+    runModUpdateCheck(server, { force: true });
+  });
+
+  const updateCount = () => {
+    const boxes = [...container.querySelectorAll('.modUpd:not(:disabled)')];
+    const label = container.querySelector('[data-count="modUpd"]');
+    if (label) label.textContent = `${boxes.filter((b) => b.checked).length} de ${boxes.length} marcados`;
+  };
+  container.querySelectorAll('.modUpd').forEach((b) => b.addEventListener('change', updateCount));
+  container.querySelectorAll('[data-select-all="modUpd"], [data-select-none="modUpd"]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      container.querySelectorAll('.modUpd:not(:disabled)').forEach((b) => { b.checked = Boolean(btn.dataset.selectAll); });
+      updateCount();
+    });
+  });
+  updateCount();
+
+  const apply = document.getElementById('modUpdApply');
+  if (!apply) return;
+  apply.addEventListener('click', async () => {
+    const out = document.getElementById('modUpdResult');
+    const chosen = [...container.querySelectorAll('.modUpd:checked')].map((b) => r.updates[Number(b.dataset.i)]);
+    if (chosen.length === 0) {
+      out.innerHTML = '<span class="error-text">No hay ningún mod marcado.</span>';
+      return;
+    }
+    if (await window.api.isRunning(server.id)) {
+      out.innerHTML = '<span class="error-text">Detén el servidor antes de actualizar mods.</span>';
+      return;
+    }
+    const withDeps = chosen.filter((u) => u.missingDeps && u.missingDeps.length);
+    let msg = `Se actualizarán ${chosen.length} mod(s).`;
+    if (withDeps.length) msg += `\n\nOjo: ${withDeps.map((u) => u.name).join(', ')} necesita(n) mods que no tienes; tendrás que añadirlos o el servidor no arrancará.`;
+    if (!confirm(`${msg}\n\n¿Continuar?`)) return;
+
+    apply.disabled = true;
+    const fullBackup = document.getElementById('modUpdBackup').checked;
+    const startTime = Date.now();
+    out.innerHTML = progressPlaceholder(fullBackup ? 'Haciendo backup completo…' : 'Descargando…');
+    window.api.onModUpdateProgress(server.id, (p) => {
+      if (p.phase === 'backup') renderProgressBar(out, p, startTime);
+      else if (p.phase === 'download') out.textContent = `Descargando ${p.index} de ${p.total}: ${p.name}…`;
+    });
+    try {
+      const res = await window.api.applyModUpdates(server.id, chosen.map((u) => u.fileName), { fullBackup, includeBeta: modUpdateIncludeBeta });
+      if (!res.ok) {
+        out.innerHTML = `<span class="error-text">${escapeHtml(res.error)}</span>`;
+        return;
+      }
+      let html = `<span class="settings-status good">✓ ${res.updated.length} mod(s) actualizados.</span>`;
+      if (res.backupFileName) html += ` Backup previo: <code>${escapeHtml(res.backupFileName)}</code>.`;
+      if (res.asideDir) html += `<br>Las versiones viejas están en <code>${escapeHtml(res.asideDir)}</code>.`;
+      if (res.failed.length) {
+        html += `<br><span class="error-text">No se pudieron actualizar: ${res.failed.map((f) => `${escapeHtml(f.name)} (${escapeHtml(f.error)})`).join('; ')}</span>`;
+      }
+      html += '<br>Arranca el servidor para comprobar que todo carga bien. Después, que tus amigos actualicen también (pestaña Mods → "Comparar mi cliente con este servidor").';
+      delete modUpdateCache[server.id];
+      out.innerHTML = html;
+    } catch (error) {
+      out.innerHTML = `<span class="error-text">${escapeHtml(error.message)}</span>`;
+    } finally {
+      window.api.removeModUpdateProgressListeners(server.id);
+      apply.disabled = false;
+    }
   });
 }
 
