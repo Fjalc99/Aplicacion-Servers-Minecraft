@@ -324,7 +324,8 @@ function createAppCore({ send, notify, minuteMs = 60 * 1000 }) {
     },
 
     'servers:updateProperties': ({ id, properties }) => serverManager.updateProperties(id, properties),
-    'servers:updateMemory': ({ id, memory }) => serverManager.updateMemory(id, memory),
+    'servers:updateMemory': ({ id, memory, memoryMin }) => serverManager.updateMemory(id, memory, memoryMin),
+    'servers:jvmArgsFile': (id) => serverManager.readJvmArgsFile(id),
     'servers:updateOptimizeJvm': ({ id, enabled }) => serverManager.updateOptimizeJvm(id, enabled),
     'servers:applyPerformancePreset': (id) => serverManager.applyPerformancePreset(id),
 

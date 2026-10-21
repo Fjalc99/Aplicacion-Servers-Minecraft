@@ -1342,6 +1342,72 @@ async function refreshBackupsList(server) {
 
 const LOADER_LABEL = { vanilla: 'Minecraft', forge: 'Forge', neoforge: 'NeoForge' };
 
+/** Tarjeta de memoria: mínima y máxima con su propio botón de guardar. */
+function bindMemoryCard(server) {
+  const maxEl = document.getElementById('cfgMemory');
+  const minEl = document.getElementById('cfgMemoryMin');
+  const saved = document.getElementById('cfgMemorySaved');
+  const gb = (mb) => (Number(mb) > 0 ? `≈ ${(Number(mb) / 1024).toFixed(1)} GB` : '');
+  const refreshGb = () => {
+    document.getElementById('cfgMemoryGb').textContent = gb(maxEl.value);
+    document.getElementById('cfgMemoryMinGb').textContent = gb(minEl.value);
+    saved.textContent = '';
+  };
+  maxEl.addEventListener('input', refreshGb);
+  minEl.addEventListener('input', refreshGb);
+  refreshGb();
+
+  async function save(max, min) {
+    saved.textContent = '';
+    if (!Number.isInteger(max) || max < 512) {
+      saved.innerHTML = '<span class="settings-status bad">✕ La máxima tiene que ser de al menos 512 MB.</span>';
+      return;
+    }
+    if (!Number.isInteger(min) || min < 256 || min > max) {
+      saved.innerHTML = '<span class="settings-status bad">✕ La mínima tiene que ser de al menos 256 MB y no mayor que la máxima.</span>';
+      return;
+    }
+    try {
+      const updated = await window.api.updateMemory(server.id, max, min);
+      Object.assign(server, updated);
+      maxEl.value = updated.memory;
+      minEl.value = updated.memoryMin || Math.min(updated.memory, 1024);
+      refreshGb();
+      const running = await window.api.isRunning(server.id);
+      saved.innerHTML = `<span class="settings-status good">✓ Guardado (${(max / 1024).toFixed(1)} GB máx. · ${(min / 1024).toFixed(1)} GB mín.).${running ? ' Reinicia el servidor para aplicarlo.' : ''}</span>`;
+      checkJvmFile();
+    } catch (error) {
+      const message = String(error.message).replace(/^Error invoking remote method '[^']+': (?:Error: )?/, '');
+      saved.innerHTML = `<span class="settings-status bad">✕ ${escapeHtml(message)}</span>`;
+    }
+  }
+
+  document.getElementById('cfgMemorySave').addEventListener('click', () => save(Number(maxEl.value), Number(minEl.value)));
+
+  // Si user_jvm_args.txt dice otra cosa (lo has editado a mano), se avisa y se ofrece usarlo.
+  async function checkJvmFile() {
+    const note = document.getElementById('cfgJvmFileNote');
+    if (!note) return;
+    let file;
+    try {
+      file = await window.api.readJvmArgsFile(server.id);
+    } catch (error) {
+      return;
+    }
+    const appMin = server.memoryMin || Math.min(server.memory, 1024);
+    const differs = file.exists && ((file.maxMb && file.maxMb !== server.memory) || (file.minMb && file.minMb !== appMin));
+    if (!differs) {
+      note.innerHTML = '';
+      return;
+    }
+    const fileMax = file.maxMb || server.memory;
+    const fileMin = Math.min(file.minMb || appMin, fileMax);
+    note.innerHTML = `<span class="settings-status warn">user_jvm_args.txt tiene ${fileMax} MB máx. / ${fileMin} MB mín., distinto de lo de aquí. Al arrancar, la app lo cambiaría por lo de arriba.</span> <button type="button" class="btn btn-ghost btn-small" id="cfgUseJvmFile">Usar los del archivo</button>`;
+    document.getElementById('cfgUseJvmFile').addEventListener('click', () => save(fileMax, fileMin));
+  }
+  checkJvmFile();
+}
+
 /** Tarjeta "Versión del servidor": ver la versión instalada y cambiarla. */
 async function renderVersionCard(server) {
   const card = document.getElementById('versionCard');
@@ -1488,15 +1554,27 @@ async function renderConfig(server) {
       <h3>Versión del servidor</h3>
       <p class="hint">Consultando versiones disponibles…</p>
     </div>
-    <div class="card">
+    <div class="card" id="memoryCard">
       <h3>Memoria del proceso Java</h3>
       <div class="form-grid">
         <div class="field">
-          <label>Memoria asignada (MB)</label>
+          <label for="cfgMemory">Máxima (-Xmx), en MB</label>
           <input type="number" id="cfgMemory" min="512" step="256" value="${server.memory}" />
+          <span class="hint" id="cfgMemoryGb"></span>
+        </div>
+        <div class="field">
+          <label for="cfgMemoryMin">Mínima (-Xms), en MB</label>
+          <input type="number" id="cfgMemoryMin" min="256" step="256" value="${server.memoryMin || Math.min(server.memory, 1024)}" />
+          <span class="hint" id="cfgMemoryMinGb"></span>
         </div>
       </div>
-      <p class="hint">Tu PC tiene ${(sysMem.totalMb / 1024).toFixed(1)} GB de RAM en total. Como orientación, no conviene pasar de ~${(recommendedMax / 1024).toFixed(1)} GB para este servidor si también vas a jugar en la misma máquina a la vez.</p>
+      <p class="hint">Tu PC tiene ${(sysMem.totalMb / 1024).toFixed(1)} GB de RAM en total. Como orientación, no conviene pasar de ~${(recommendedMax / 1024).toFixed(1)} GB para este servidor si también vas a jugar en la misma máquina a la vez. La mínima es lo que Java reserva nada más arrancar; dejarla en 1–2 GB está bien (ponerla igual que la máxima evita que vaya pidiendo memoria, pero la ocupa entera desde el principio).</p>
+      <div class="settings-actions">
+        <button id="cfgMemorySave" type="button" class="btn btn-accent">Guardar memoria</button>
+        <span id="cfgMemorySaved" class="hint"></span>
+      </div>
+      <p class="hint" id="cfgJvmFileNote"></p>
+      <p class="hint" style="margin-bottom:0;">Se aplica la próxima vez que inicies el servidor. La app escribe estos valores en <code>user_jvm_args.txt</code> al arrancar: cámbialos aquí, no en el archivo (las demás opciones que añadas a ese archivo se conservan).</p>
     </div>
     <div class="card">
       <h3>Rendimiento</h3>
@@ -1595,6 +1673,7 @@ async function renderConfig(server) {
   `;
 
   renderVersionCard(server);
+  bindMemoryCard(server);
 
   document.getElementById('cfgOptimizeJvm').addEventListener('change', async (e) => {
     try {
@@ -1653,8 +1732,6 @@ async function renderConfig(server) {
 
   document.getElementById('cfgSave').addEventListener('click', async () => {
     try {
-      const memory = Number(document.getElementById('cfgMemory').value);
-      await window.api.updateMemory(server.id, memory);
       const properties = {
         difficulty: document.getElementById('cfgDifficulty').value,
         gamemode: document.getElementById('cfgGamemode').value,

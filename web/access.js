@@ -70,6 +70,7 @@ const OWNER_CHANNELS = new Set([
   'servers:delete',
   'servers:updateProperties',
   'servers:updateMemory',
+  'servers:jvmArgsFile',
   'servers:updateOptimizeJvm',
   'servers:updateAutoRestart',
   'servers:updateAutoBackup',

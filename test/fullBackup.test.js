@@ -176,3 +176,20 @@ test('actualizar versión: hace backup completo antes, guarda la versión y no d
     loaderUpdater.updateServerVersion = original;
   }
 });
+
+test('memoria: máxima y mínima se guardan; mínima mayor que la máxima se rechaza; se lee user_jvm_args.txt', () => {
+  const core = newCore();
+  const server = makeServer('memoria');
+  const updated = core.handlers['servers:updateMemory']({ id: server.id, memory: 9000, memoryMin: 2048 });
+  assert.equal(updated.memory, 9000);
+  assert.equal(updated.memoryMin, 2048);
+  assert.throws(() => core.handlers['servers:updateMemory']({ id: server.id, memory: 4096, memoryMin: 8192 }), /mínima no puede ser mayor/);
+  assert.equal(store.getServer(server.id).memory, 9000, 'si falla no cambia nada');
+
+  writeFile(path.join(server.dir, 'user_jvm_args.txt'), '-Xmx10G\n-Xms4G\n-Dmi.opcion=1\n');
+  assert.deepEqual(core.handlers['servers:jvmArgsFile'](server.id), { exists: true, maxMb: 10240, minMb: 4096 });
+  // Al guardar se actualiza el archivo en el momento, sin perder lo demás
+  core.handlers['servers:updateMemory']({ id: server.id, memory: 8192, memoryMin: 2048 });
+  assert.deepEqual(core.handlers['servers:jvmArgsFile'](server.id), { exists: true, maxMb: 8192, minMb: 2048 });
+  assert.match(fs.readFileSync(path.join(server.dir, 'user_jvm_args.txt'), 'utf-8'), /-Dmi\.opcion=1/);
+});

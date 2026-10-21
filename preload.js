@@ -10,7 +10,8 @@ contextBridge.exposeInMainWorld('api', {
   removeCreateProgressListeners: () => ipcRenderer.removeAllListeners('servers:createProgress'),
   deleteServer: (id, deleteFiles) => ipcRenderer.invoke('servers:delete', { id, deleteFiles }),
   updateProperties: (id, properties) => ipcRenderer.invoke('servers:updateProperties', { id, properties }),
-  updateMemory: (id, memory) => ipcRenderer.invoke('servers:updateMemory', { id, memory }),
+  updateMemory: (id, memory, memoryMin) => ipcRenderer.invoke('servers:updateMemory', { id, memory, memoryMin }),
+  readJvmArgsFile: (id) => ipcRenderer.invoke('servers:jvmArgsFile', id),
   updateOptimizeJvm: (id, enabled) => ipcRenderer.invoke('servers:updateOptimizeJvm', { id, enabled }),
   updateAutoRestart: (id, enabled) => ipcRenderer.invoke('servers:updateAutoRestart', { id, enabled }),
   updateAutoBackup: (id, onStop, everyHours) =>

@@ -2,7 +2,7 @@ const { spawn, execFile } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
-const { buildJvmArgs } = require('./jvmFlags');
+const { buildJvmArgs, mergeUserJvmArgs } = require('./jvmFlags');
 const processTree = require('./processTree');
 
 // serverId -> { proc, intentionalStop, recentLog: string[], players: Set<string> }
@@ -37,9 +37,11 @@ function buildLaunchCommand(server) {
     // Los scripts generados por Forge/NeoForge ya incluyen los argumentos de memoria
     // en user_jvm_args.txt; lo sobreescribimos para respetar lo elegido en la UI
     // (memoria + flags de optimización de GC si están activados).
+    // Se conservan los comentarios y cualquier otra opción que hayas puesto a mano.
     const argsFile = path.join(dir, 'user_jvm_args.txt');
     if (fs.existsSync(argsFile)) {
-      fs.writeFileSync(argsFile, buildJvmArgs(memory, optimize).join('\n') + '\n');
+      const before = fs.readFileSync(argsFile, 'utf-8');
+      fs.writeFileSync(argsFile, mergeUserJvmArgs(before, memory, optimize, server.memoryMin));
     }
     if (os.platform() === 'win32' && !/\.bat$/i.test(scriptName)) {
       throw new Error('Este servidor solo tiene un script de Linux (run.sh). Ábrelo desde Linux o instala/genera run.bat.');
@@ -52,7 +54,7 @@ function buildLaunchCommand(server) {
   // Vanilla: jar directo
   return {
     cmd: 'java',
-    args: [...buildJvmArgs(memory, optimize), '-jar', server.launch.value, 'nogui'],
+    args: [...buildJvmArgs(memory, optimize, server.memoryMin), '-jar', server.launch.value, 'nogui'],
     shell: false,
   };
 }

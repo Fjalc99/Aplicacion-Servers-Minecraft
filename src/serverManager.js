@@ -184,16 +184,42 @@ function updateProperties(id, properties) {
   return server;
 }
 
-function updateMemory(id, memoryMb) {
+/**
+ * Memoria del proceso Java: máxima (-Xmx) y, opcionalmente, mínima (-Xms).
+ * Sin mínima se usa 1 GB (o la máxima si es menor).
+ */
+function updateMemory(id, memoryMb, minMb) {
   const server = store.getServer(id);
   if (!server) throw new Error('Servidor no encontrado');
   const memory = Number(memoryMb);
   if (!Number.isInteger(memory) || memory < 512) {
-    throw new Error('La memoria debe ser un número entero de al menos 512 MB.');
+    throw new Error('La memoria máxima debe ser un número entero de al menos 512 MB.');
+  }
+  let min = null;
+  if (minMb !== undefined && minMb !== null && minMb !== '') {
+    min = Number(minMb);
+    if (!Number.isInteger(min) || min < 256) throw new Error('La memoria mínima debe ser un número entero de al menos 256 MB.');
+    if (min > memory) throw new Error('La memoria mínima no puede ser mayor que la máxima.');
   }
   server.memory = memory;
+  server.memoryMin = min;
   store.saveServer(server);
+  // user_jvm_args.txt se pone al día ya (no solo al arrancar), conservando lo demás que tenga.
+  const argsFile = path.join(server.dir, 'user_jvm_args.txt');
+  if (fs.existsSync(argsFile)) {
+    const { mergeUserJvmArgs } = require('./jvmFlags');
+    fs.writeFileSync(argsFile, mergeUserJvmArgs(fs.readFileSync(argsFile, 'utf-8'), memory, server.optimizeJvm !== false, min));
+  }
   return server;
+}
+
+/** Lo que pone ahora mismo en user_jvm_args.txt (por si se ha editado a mano). */
+function readJvmArgsFile(id) {
+  const server = store.getServer(id);
+  if (!server) throw new Error('Servidor no encontrado');
+  const file = path.join(server.dir, 'user_jvm_args.txt');
+  if (!fs.existsSync(file)) return { exists: false, maxMb: null, minMb: null };
+  return { exists: true, ...require('./jvmFlags').parseMemoryArgs(fs.readFileSync(file, 'utf-8')) };
 }
 
 function updateOptimizeJvm(id, enabled) {
@@ -464,6 +490,7 @@ module.exports = {
   deleteServer,
   updateProperties,
   updateMemory,
+  readJvmArgsFile,
   updateOptimizeJvm,
   updateAutoRestart,
   updateAutoBackup,
