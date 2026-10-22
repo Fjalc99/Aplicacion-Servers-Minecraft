@@ -13,7 +13,7 @@ par de clics.
 - [Cómo funciona](#cómo-funciona)
   - [Crear un servidor](#crear-un-servidor)
   - [Importar un servidor ya existente](#importar-un-servidor-ya-existente)
-  - [Analizar y copiar mods](#analizar-y-copiar-mods-forgeneoforge)
+  - [Pestaña Mods](#pestaña-mods)
   - [Importar un mundo existente](#importar-un-mundo-existente)
   - [Consola](#consola)
   - [Rendimiento](#rendimiento)
@@ -87,52 +87,57 @@ fiable de leerla sin decompilar el jar), así que el asistente te la muestra com
 sugerencia editable y te pide que la confirmes. El servidor importado queda en el
 listado igual que uno creado desde la app.
 
-### Analizar y copiar mods (Forge/NeoForge)
+### Pestaña Mods
 
-En la pestaña **Mods**, pulsa "Elegir carpeta de mods" y selecciona la carpeta
-`mods` de tu Minecraft (cliente) **o la del propio servidor**. Para cada `.jar`, la app
-busca en este orden:
+#### Mods del servidor
+
+Lo primero que ves en la pestaña **Mods**: la lista de los mods del servidor con
+buscador y filtros (**Todos, Con actualización, Problemas, Desactivados**).
+
+- Cada mod muestra su versión, dónde va (servidor y cliente, solo servidor, solo
+  cliente) y su estado: al día, versión nueva, **duplicado** (dos versiones del
+  mismo mod: el servidor no arranca) o **sobra aquí** (mod solo de cliente).
+- **Interruptor para desactivar** un mod sin borrarlo: se renombra a `.jar.disabled`
+  y el servidor no lo carga. Muy útil para encontrar qué mod da problemas.
+- Al pulsar un mod, a la derecha su **detalle**: qué otros mods lo necesitan (según
+  lo que declara cada `.jar`), la última versión y acciones. Si desactivas o quitas
+  uno que otros necesitan, te avisa antes.
+- Marcando varios: **Actualizar, Activar/Desactivar, ZIP y Quitar** (lo quitado va a
+  `mods-quitados-<fecha>/`, no se borra). Con el servidor apagado.
+
+#### Pasar mods entre el servidor y tu Minecraft
+
+Botón **"Pasar mods con mi Minecraft"**: el servidor a la izquierda y tu Minecraft a
+la derecha (detecta tus instancias de CurseForge, Modrinth o Prism, o eliges otra
+carpeta), **una fila por mod, alineada en los dos lados**:
+
+| Fila | Acciones |
+|---|---|
+| Te falta | → copiar a tu Minecraft |
+| Otra versión | → poner la del servidor en tu Minecraft · ← poner la tuya en el servidor |
+| El servidor no lo tiene | ← copiar al servidor · ✕ quitar de tu Minecraft |
+| Solo servidor: te sobra | ✕ quitar de tu Minecraft |
+| Solo cliente: sobra en el servidor | ✕ quitar del servidor |
+| Solo cliente/servidor · bien, Igual | nada (los iguales salen ocultos) |
+
+Los cambios quedan **pendientes** en una barra abajo (con **Deshacer todo**) y no se
+toca nada hasta pulsar **Aplicar**. Lo que se quita o se sustituye se mueve a
+`mods-quitados-<fecha>`, junto a cada carpeta de mods. También genera el **ZIP para tus
+amigos** con los mods del servidor que hacen falta para jugar.
+
+#### Añadir mods
+
+Botón **"Añadir mods"**: eliges una carpeta `mods` (la de tu Minecraft, un modpack
+descargado…) y la app te dice cuáles van en el servidor y cuáles son solo de cliente,
+para copiarlos o sacar un ZIP. Para identificar cada `.jar` busca en este orden:
 
 1. **Modrinth**, por hash SHA-1 (no necesita nada). Según el campo `server_side`:
    `required`/`optional` → **necesario en servidor**; `unsupported` → **solo cliente**.
 2. **CurseForge**, por fingerprint (el mismo método que usa la app de CurseForge),
    solo para los que no están en Modrinth. Necesita una clave de API gratuita (ver abajo).
-   Si el autor ha marcado el archivo como "Client" o "Server", se usa eso; si no,
-   sale como **lado sin indicar**, ya con su nombre y su enlace para que lo revises.
 3. **La ficha que trae el propio `.jar`** (`neoforge.mods.toml`, `mods.toml` o
-   `fabric.mod.json`): saca el nombre del mod y, si el autor lo declara solo de
-   cliente (`displayTest="IGNORE_SERVER_VERSION"` o `"environment": "client"`), lo
-   marca así.
-
-Lo que no se identifica por ninguna vía sale como **no identificado** y va en la
-lista del servidor por si acaso.
-
-Todos los mods salen marcados; cada lista tiene **Marcar todos / Desmarcar todos** y
-un contador. Si analizas la carpeta de tu cliente, la columna "En el servidor" dice
-si cada uno es nuevo, una actualización o "Ya está igual"; al copiar, los que ya
-están iguales se saltan solos. Si analizas la carpeta `mods` del propio servidor,
-sirve para ver qué mods son **solo de cliente** (sobran en el servidor y a veces lo
-hacen fallar) y para generar los ZIP.
-
-#### Comparar tu cliente con el servidor
-
-Botón **"Comparar mi cliente con este servidor"**: eliges la carpeta `mods` de tu
-Minecraft (o la de un amigo) y la app la compara con la del servidor:
-
-| Grupo | Qué significa | Qué propone |
-|---|---|---|
-| Te faltan | El servidor los tiene y hacen falta en el cliente ("Necesario"/"Revisar"; los "Opcional" salen desmarcados) | Copiarlos desde el servidor |
-| En otra versión | Mismo mod, otra versión | Cambiar la tuya por la del servidor |
-| Solo de servidor | Mods que solo funcionan en el servidor | Quitarlos de tu cliente |
-| Los tienes tú, pero el servidor no | Si son de contenido, el servidor te echa al entrar | Quitarlos (desmarcado: decides tú) |
-| Solo de cliente | Gráficos, interfaz, minimapa… | Nada, están bien |
-
-**"Arreglar mi cliente con lo marcado"** aplica los cambios. No se borra nada: lo
-que se quita o se sustituye se mueve a `mods-quitados-<fecha>`, junto a tu carpeta
-`mods`. Cierra Minecraft antes.
-
-**"ZIP con los mods que necesita un cliente"** genera el pack para tus amigos: todos
-los mods del servidor que hacen falta en el cliente, en la versión del servidor.
+   `fabric.mod.json`): nombre, versión, dependencias y, si el autor lo declara solo de
+   cliente, lo marca así.
 
 #### Actualizar los mods del servidor
 
@@ -149,8 +154,8 @@ tienes clave, en CurseForge por fingerprint. Por defecto solo versiones estables
   comprueba el hash con el publicado y la versión vieja se mueve a
   `mods-antiguos-<fecha>/`. La app decide qué descargar consultando ella misma a
   Modrinth/CurseForge; la interfaz nunca le pasa URLs.
-- Después, tus amigos tienen que tener las mismas versiones: "Comparar mi cliente con
-  este servidor" o el ZIP de cliente.
+- Después, tus amigos tienen que tener las mismas versiones: "Pasar mods con mi
+  Minecraft" o el ZIP para amigos.
 
 #### Clave de CurseForge (opcional)
 
@@ -190,6 +195,12 @@ Pestaña **Consola**: inicia/detiene el proceso Java, ves el log en vivo (con un
 tope de ~250 KB en pantalla para que sesiones muy largas no consuman memoria de
 más) y puedes enviar comandos (`/op`, `/whitelist add`, etc.) al servidor mientras
 está en marcha.
+
+- La caja de comandos está **siempre visible abajo**: el log hace scroll por dentro, sin
+  mover la página.
+- Si subes para leer algo, el log **no salta** al final con cada línea nueva; aparece
+  un botón **"↓ Ir al final"**.
+- **↑ / ↓** en la caja recuperan los comandos anteriores.
 
 ### Rendimiento
 
@@ -352,8 +363,9 @@ src/
   jvmFlags.js                Flags de JVM optimizados (Aikar's flags)
   modAnalyzer.js             Análisis de mods (Modrinth → CurseForge → ficha del .jar), copiado y diff
   curseforge.js              Fingerprint y API de CurseForge (clave guardada solo en este PC)
-  clientSync.js              Comparar los mods de un cliente con los del servidor y arreglarlo
+  clientSync.js              Pasar mods entre el servidor y tu Minecraft (filas alineadas, en los dos sentidos)
   loaderUpdater.js           Ver y cambiar la versión de Forge/NeoForge/Vanilla de un servidor
+  serverMods.js              Lista de mods del servidor: versión, dependencias, desactivar, quitar
   modUpdater.js              Buscar y aplicar actualizaciones de mods (Modrinth + CurseForge)
   localWorld.js              Exportar el mundo a partida local (un jugador) y traerlo de vuelta
   nbt.js                     Lector/escritor de NBT (level.dat, playerdata)

@@ -48,6 +48,28 @@ async function init() {
   document.getElementById('consoleSend').addEventListener('click', sendConsoleCommand);
   document.getElementById('consoleInput').addEventListener('keydown', (e) => {
     if (e.key === 'Enter') sendConsoleCommand();
+    // ↑ / ↓: comandos anteriores, como en una consola de verdad
+    if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+      const h = consoleHistory;
+      if (h.items.length === 0) return;
+      e.preventDefault();
+      if (h.index === -1) h.draft = e.target.value;
+      if (e.key === 'ArrowUp') h.index = h.index === -1 ? h.items.length - 1 : Math.max(0, h.index - 1);
+      else h.index = h.index === -1 ? -1 : h.index + 1;
+      if (h.index >= h.items.length) h.index = -1;
+      e.target.value = h.index === -1 ? h.draft : h.items[h.index];
+      const end = e.target.value.length;
+      e.target.setSelectionRange(end, end);
+    }
+  });
+  // Si subes para leer algo, la consola deja de saltar al final con cada línea nueva
+  document.getElementById('consoleLog').addEventListener('scroll', () => {
+    if (consoleAtBottom()) document.getElementById('consoleJump').hidden = true;
+  });
+  document.getElementById('consoleJump').addEventListener('click', () => {
+    const log = document.getElementById('consoleLog');
+    log.scrollTop = log.scrollHeight;
+    document.getElementById('consoleJump').hidden = true;
   });
 
   try {
@@ -214,6 +236,14 @@ async function switchTab(tabName, serverArg) {
   if (tabName === 'overview') renderOverview(server);
   if (tabName === 'config') renderConfig(server);
   if (tabName === 'mods') renderMods(server);
+  if (tabName === 'console') {
+    // Al entrar en la consola: al final del todo y listo para escribir
+    const log = document.getElementById('consoleLog');
+    log.scrollTop = log.scrollHeight;
+    document.getElementById('consoleJump').hidden = true;
+    const input = document.getElementById('consoleInput');
+    if (!input.disabled) input.focus();
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1762,27 +1792,442 @@ async function renderConfig(server) {
 let lastModAnalysis = [];
 let lastModAnalysisInfo = {};
 
+// Estado de la pestaña Mods (se reinicia al cambiar de servidor)
+const modsUi = {
+  serverId: null,
+  view: 'list', // 'list' | 'sync' | 'add'
+  filter: 'all',
+  search: '',
+  selected: new Set(),
+  open: null,
+  data: null, // resultado de listServerMods
+  busy: false,
+};
+
+// serverId -> { at, result }: la comprobación de actualizaciones se hace como mucho una vez por hora.
+const modUpdateCache = {};
+
+const MOD_SIDE_LABEL = { both: 'Servidor y cliente', server: 'Solo servidor', client: 'Solo cliente', unknown: 'Sin dato' };
+
+const ICON_PALETTE = ['#5b8def', '#e8963f', '#6fa85a', '#b07cd8', '#d4b14a', '#4fb3bf', '#d9707a'];
+function modIcon(name, size = 32, faded = false) {
+  const color = ICON_PALETTE[String(name).length % ICON_PALETTE.length];
+  return `<span class="mod-icon${faded ? ' faded' : ''}" style="width:${size}px;height:${size}px;flex:0 0 ${size}px;font-size:${Math.round(size / 2.3)}px;background:${color}" aria-hidden="true">${escapeHtml(String(name).charAt(0).toUpperCase())}</span>`;
+}
+
 function renderMods(server) {
   const el = document.getElementById('tab-mods');
-  const isVanilla = server.loader === 'vanilla';
+  if (modsUi.serverId !== server.id) {
+    Object.assign(modsUi, { serverId: server.id, view: 'list', filter: 'all', search: '', selected: new Set(), open: null, data: null });
+  }
+  if (server.loader === 'vanilla') {
+    el.innerHTML = '<p class="hint">Este servidor es Vanilla: no admite mods. Puedes usarlo con datapacks manualmente.</p>';
+    return;
+  }
+  if (modsUi.view === 'sync') return renderSyncView(server);
+  if (modsUi.view === 'add') return renderAddModsView(server);
+  return renderServerModsView(server);
+}
+
+// ---------------------------------------------------------------------------
+// Pantalla 1: mods del servidor
+// ---------------------------------------------------------------------------
+
+async function renderServerModsView(server) {
+  const el = document.getElementById('tab-mods');
   el.innerHTML = `
-    ${isVanilla ? '<p class="hint">Este servidor es Vanilla: no admite mods. Puedes usarlo con datapacks manualmente.</p>' : ''}
-    <p class="hint" style="margin-top:0;">
-      <strong>Preparar el servidor</strong>: elige una carpeta <code>mods</code> (la de tu Minecraft o la del propio servidor) y te digo cuáles van en el servidor y cuáles son solo de cliente.<br>
-      <strong>Comparar mi cliente</strong>: elige la carpeta <code>mods</code> de tu Minecraft (o la de un amigo) y te digo qué le falta, qué le sobra y qué tiene en otra versión para poder entrar a este servidor.<br>
-      Cada mod se busca en Modrinth, luego en CurseForge y, si no, en la ficha del propio .jar.
-    </p>
+    <div class="mods-head">
+      <div>
+        <h2 class="mods-title">Mods del servidor</h2>
+        <div class="hint" id="modsCountLine">Cargando…</div>
+      </div>
+      <div class="mods-head-actions">
+        <button type="button" id="modsCheckUpdates" class="btn btn-ghost">Buscar actualizaciones</button>
+        <button type="button" id="modsAdd" class="btn btn-ghost">Añadir mods</button>
+        <button type="button" id="modsSync" class="btn btn-accent">Pasar mods con mi Minecraft</button>
+      </div>
+    </div>
+    <div class="mods-filters">
+      <label class="mods-search">
+        <span class="visually-hidden">Buscar mod</span>
+        <input type="search" id="modsSearch" placeholder="Buscar por nombre o archivo…" value="${escapeHtml(modsUi.search)}" />
+      </label>
+      <div role="group" aria-label="Filtrar" id="modsFilterChips" class="mods-chips"></div>
+    </div>
+    <div id="modsStatus" class="hint"></div>
+    <div class="mods-layout">
+      <section class="mods-list-card" aria-label="Lista de mods">
+        <div class="mods-list-scroll"><div id="modsRows" class="mods-rows"><p class="hint" style="padding:16px;">Leyendo la carpeta mods…</p></div></div>
+      </section>
+      <aside class="mods-detail" id="modsDetail" aria-label="Detalle del mod"></aside>
+    </div>
+    <div id="modsSelectionBar"></div>
+  `;
+  document.getElementById('modsAdd').addEventListener('click', () => { modsUi.view = 'add'; renderMods(server); });
+  document.getElementById('modsSync').addEventListener('click', () => { modsUi.view = 'sync'; renderMods(server); });
+  document.getElementById('modsCheckUpdates').addEventListener('click', () => checkServerModUpdates(server, { force: true }));
+  document.getElementById('modsSearch').addEventListener('input', (e) => {
+    modsUi.search = e.target.value;
+    renderServerModsBody(server);
+  });
+
+  await loadServerMods(server);
+  checkServerModUpdates(server, { force: false });
+}
+
+async function loadServerMods(server) {
+  let res;
+  try {
+    res = await window.api.listServerMods(server.id);
+  } catch (error) {
+    res = { ok: false, error: error.message };
+  }
+  if (state.selectedId !== server.id || modsUi.view !== 'list') return;
+  if (!res.ok) {
+    document.getElementById('modsRows').innerHTML = `<p class="error-text" style="padding:16px;">${escapeHtml(res.error)}</p>`;
+    return;
+  }
+  modsUi.data = res;
+  const names = new Set(res.mods.map((m) => m.fileName));
+  modsUi.selected = new Set([...modsUi.selected].filter((f) => names.has(f)));
+  if (!modsUi.open || !names.has(modsUi.open)) modsUi.open = res.mods[0] ? res.mods[0].fileName : null;
+  renderServerModsBody(server);
+}
+
+function modUpdatesFor(server) {
+  const cached = modUpdateCache[server.id];
+  const map = new Map();
+  if (cached) for (const u of cached.result.updates) map.set(u.fileName, u);
+  return map;
+}
+
+async function checkServerModUpdates(server, { force, quiet = false }) {
+  const cached = modUpdateCache[server.id];
+  if (!force && cached && Date.now() - cached.at < 60 * 60 * 1000) {
+    renderServerModsBody(server);
+    return;
+  }
+  // quiet: comprobar sin tapar el mensaje que haya (p. ej. "✓ 3 mods actualizados")
+  const status = quiet ? null : document.getElementById('modsStatus');
+  const btn = document.getElementById('modsCheckUpdates');
+  if (status) status.textContent = 'Buscando actualizaciones en Modrinth y CurseForge…';
+  if (btn) btn.disabled = true;
+  try {
+    const result = await window.api.checkModUpdates(server.id, false);
+    if (!result.ok) {
+      if (status && force) status.innerHTML = `<span class="error-text">${escapeHtml(result.error)}</span>`;
+      else if (status) status.textContent = '';
+      return;
+    }
+    modUpdateCache[server.id] = { at: Date.now(), result };
+    if (state.selectedId !== server.id || modsUi.view !== 'list') return;
+    const n = result.updates.length;
+    if (status) {
+      status.innerHTML = n
+        ? `Hay <strong>${n}</strong> mod(s) con versión nueva para tu ${escapeHtml(LOADER_LABEL[result.loader] || result.loader)} ${escapeHtml(result.mcVersion)}.`
+        : '<span class="settings-status good">✓ Todos los mods que se pueden comprobar están al día.</span>';
+      if ((result.warnings || []).includes('curseforge-sin-clave')) {
+        status.innerHTML += ' <span class="hint">(Sin clave de CurseForge, los mods que solo están allí no se comprueban.)</span>';
+      }
+    }
+    if (force && n) modsUi.filter = 'updates';
+    renderServerModsBody(server);
+  } catch (error) {
+    if (status) status.textContent = '';
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+function modStatus(m, update) {
+  if (m.problem) return { text: m.problem, cls: 'bad' };
+  if (m.disabled) return { text: 'Desactivado', cls: 'muted' };
+  if (update) return { text: `→ ${update.newVersion}`, cls: 'warn' };
+  if (m.source === 'Sin identificar') return { text: 'No comprobable', cls: 'muted' };
+  return { text: 'Al día', cls: 'ok' };
+}
+
+function renderServerModsBody(server) {
+  const data = modsUi.data;
+  const rowsEl = document.getElementById('modsRows');
+  if (!data || !rowsEl) return;
+  const updates = modUpdatesFor(server);
+  const mods = data.mods;
+  const counts = {
+    all: mods.length,
+    updates: mods.filter((m) => updates.has(m.fileName) && !m.disabled).length,
+    problems: mods.filter((m) => m.problem).length,
+    disabled: mods.filter((m) => m.disabled).length,
+  };
+  document.getElementById('modsCountLine').innerHTML = `${mods.length} mods en <code>${escapeHtml(data.dir)}</code>`;
+
+  const chips = [['all', 'Todos'], ['updates', 'Con actualización'], ['problems', 'Problemas'], ['disabled', 'Desactivados']];
+  const chipsEl = document.getElementById('modsFilterChips');
+  chipsEl.innerHTML = chips
+    .map(([id, label]) => `<button type="button" class="mods-chip${modsUi.filter === id ? ' on' : ''}" data-filter="${id}" aria-pressed="${modsUi.filter === id}">${label} <span class="mods-chip-count">${counts[id]}</span></button>`)
+    .join('');
+  chipsEl.querySelectorAll('[data-filter]').forEach((b) =>
+    b.addEventListener('click', () => { modsUi.filter = b.dataset.filter; renderServerModsBody(server); })
+  );
+
+  const q = modsUi.search.trim().toLowerCase();
+  const visible = mods.filter((m) => {
+    if (q && !m.name.toLowerCase().includes(q) && !m.fileName.toLowerCase().includes(q)) return false;
+    if (modsUi.filter === 'updates') return updates.has(m.fileName) && !m.disabled;
+    if (modsUi.filter === 'problems') return Boolean(m.problem);
+    if (modsUi.filter === 'disabled') return m.disabled;
+    return true;
+  });
+
+  rowsEl.innerHTML = `
+    <div class="mods-row mods-row-head"><span></span><span>Mod</span><span>Versión</span><span>Va en</span><span>Estado</span><span class="right">Activo</span></div>
+    ${visible.length === 0 ? '<p class="hint" style="padding:16px;">No hay mods con ese filtro.</p>' : ''}
+    ${visible
+      .map((m, i) => {
+        const st = modStatus(m, updates.get(m.fileName));
+        const open = modsUi.open === m.fileName;
+        const sel = modsUi.selected.has(m.fileName);
+        return `
+        <div class="mods-row${open ? ' open' : ''}${sel ? ' selected' : ''}">
+          <span class="center"><input type="checkbox" data-sel="${i}" ${sel ? 'checked' : ''} aria-label="Seleccionar ${escapeHtml(m.name)}" /></span>
+          <button type="button" class="mods-name-btn" data-open="${i}">
+            ${modIcon(m.name, 32, m.disabled)}
+            <span class="mods-name-text">
+              <span class="mods-name${m.disabled ? ' off' : ''}">${escapeHtml(m.name)}</span>
+              <span class="mod-file">${escapeHtml(m.fileName)}</span>
+            </span>
+          </button>
+          <span class="mono">${escapeHtml(m.version || '—')}</span>
+          <span class="mods-side side-${m.side}">${MOD_SIDE_LABEL[m.side] || ''}</span>
+          <span><span class="mods-status ${st.cls}">${escapeHtml(st.text)}</span></span>
+          <span class="right">
+            <button type="button" role="switch" class="mods-switch${m.disabled ? '' : ' on'}" aria-checked="${!m.disabled}" aria-label="${m.disabled ? 'Activar' : 'Desactivar'} ${escapeHtml(m.name)}" data-toggle="${i}"><span></span></button>
+          </span>
+        </div>`;
+      })
+      .join('')}
+    <div class="mods-foot hint">Mostrando ${visible.length} de ${mods.length} · los desactivados se renombran a <code>.jar.disabled</code> y el servidor no los carga</div>
+  `;
+
+  rowsEl.querySelectorAll('[data-sel]').forEach((box) =>
+    box.addEventListener('change', () => {
+      const m = visible[Number(box.dataset.sel)];
+      if (box.checked) modsUi.selected.add(m.fileName);
+      else modsUi.selected.delete(m.fileName);
+      renderServerModsBody(server);
+    })
+  );
+  rowsEl.querySelectorAll('[data-open]').forEach((b) =>
+    b.addEventListener('click', () => { modsUi.open = visible[Number(b.dataset.open)].fileName; renderServerModsBody(server); })
+  );
+  rowsEl.querySelectorAll('[data-toggle]').forEach((b) =>
+    b.addEventListener('click', () => {
+      const m = visible[Number(b.dataset.toggle)];
+      setModsEnabledUi(server, [m.fileName], m.disabled);
+    })
+  );
+
+  renderModDetail(server, updates);
+  renderModsSelectionBar(server, updates);
+}
+
+function renderModDetail(server, updates) {
+  const el = document.getElementById('modsDetail');
+  const m = modsUi.data.mods.find((x) => x.fileName === modsUi.open);
+  if (!m) {
+    el.innerHTML = '<p class="hint">Elige un mod de la lista para ver su detalle.</p>';
+    return;
+  }
+  const update = updates.get(m.fileName);
+  const dependents = m.dependents.length ? m.dependents.map(escapeHtml).join(', ') : 'Ningún otro mod';
+  let note = m.note ? `<p class="mods-note-box bad">${escapeHtml(m.note)}</p>` : '';
+  if (!note && update && update.missingDeps && update.missingDeps.length) {
+    note = `<p class="mods-note-box warn">La versión nueva necesita también: ${update.missingDeps.map(escapeHtml).join(', ')}.</p>`;
+  }
+  if (!note && m.disabled && m.dependents.length) {
+    note = `<p class="mods-note-box bad">Está desactivado y lo necesitan otros mods: el servidor no arrancará así.</p>`;
+  }
+  el.innerHTML = `
+    <div class="mods-detail-head">
+      ${modIcon(m.name, 44, m.disabled)}
+      <div style="min-width:0;">
+        <h3>${escapeHtml(m.name)}</h3>
+        <span class="hint">${escapeHtml(m.source)}</span>
+      </div>
+    </div>
+    <div class="mods-detail-file">${escapeHtml(m.fileName)}</div>
+    <dl class="mods-detail-dl">
+      <dt>Instalada</dt><dd>${escapeHtml(m.version || '—')}</dd>
+      <dt>Última</dt><dd class="${update ? 'warn' : 'ok'}">${escapeHtml(update ? update.newVersion : m.source === 'Sin identificar' ? '—' : 'Es la última')}</dd>
+      <dt>Va en</dt><dd>${MOD_SIDE_LABEL[m.side] || '—'}</dd>
+      <dt>Lo necesitan</dt><dd>${dependents}</dd>
+    </dl>
+    ${note}
+    <div class="mods-detail-actions">
+      ${update && update.canDownload && !m.disabled ? `<button type="button" class="btn btn-accent" id="detailUpdate">Actualizar a ${escapeHtml(update.newVersion)}</button>` : ''}
+      <div class="mods-detail-row">
+        ${m.url ? `<a class="btn btn-ghost" href="${escapeHtml(m.url)}" target="_blank" rel="noopener">Ver su página</a>` : ''}
+        <button type="button" class="btn btn-ghost" id="detailToggle">${m.disabled ? 'Activar' : 'Desactivar'}</button>
+        <button type="button" class="btn btn-ghost danger-ghost" id="detailRemove">Quitar</button>
+      </div>
+    </div>
+    <div id="detailMsg" class="hint"></div>
+  `;
+  const upd = document.getElementById('detailUpdate');
+  if (upd) upd.addEventListener('click', () => updateModsUi(server, [m.fileName]));
+  document.getElementById('detailToggle').addEventListener('click', () => setModsEnabledUi(server, [m.fileName], m.disabled));
+  document.getElementById('detailRemove').addEventListener('click', () => removeModsUi(server, [m.fileName]));
+}
+
+function renderModsSelectionBar(server, updates) {
+  const bar = document.getElementById('modsSelectionBar');
+  const chosen = modsUi.data.mods.filter((m) => modsUi.selected.has(m.fileName));
+  if (chosen.length === 0) {
+    bar.innerHTML = '';
+    return;
+  }
+  const updatable = chosen.filter((m) => updates.has(m.fileName) && updates.get(m.fileName).canDownload && !m.disabled);
+  const allDisabled = chosen.every((m) => m.disabled);
+  bar.innerHTML = `
+    <div class="mods-selection" role="region" aria-label="Acciones con los seleccionados">
+      <strong>${chosen.length} seleccionados</strong>
+      <div class="mods-head-actions">
+        ${updatable.length ? `<button type="button" class="btn btn-accent" id="selUpdate">Actualizar (${updatable.length})</button>` : ''}
+        <button type="button" class="btn btn-ghost" id="selToggle">${allDisabled ? 'Activar' : 'Desactivar'}</button>
+        <button type="button" class="btn btn-ghost" id="selZip">ZIP</button>
+        <button type="button" class="btn btn-ghost danger-ghost" id="selRemove">Quitar</button>
+        <button type="button" class="btn btn-ghost" id="selClear">Cancelar</button>
+      </div>
+    </div>`;
+  const su = document.getElementById('selUpdate');
+  if (su) su.addEventListener('click', () => updateModsUi(server, updatable.map((m) => m.fileName)));
+  document.getElementById('selToggle').addEventListener('click', () => setModsEnabledUi(server, chosen.map((m) => m.fileName), allDisabled));
+  document.getElementById('selRemove').addEventListener('click', () => removeModsUi(server, chosen.map((m) => m.fileName)));
+  document.getElementById('selClear').addEventListener('click', () => { modsUi.selected.clear(); renderServerModsBody(server); });
+  document.getElementById('selZip').addEventListener('click', async () => {
+    const status = document.getElementById('modsStatus');
+    status.textContent = IS_WEB ? 'Preparando el ZIP…' : 'Elige dónde guardar el ZIP…';
+    try {
+      const result = await window.api.exportModsZip(server.id, chosen.map((m) => ({ file: m.file, fileName: m.fileName })));
+      if (result.canceled) { status.textContent = ''; return; }
+      status.innerHTML = result.ok
+        ? `ZIP creado con ${result.count} mods (${(result.size / 1024 / 1024).toFixed(1)} MB).`
+        : `<span class="error-text">${escapeHtml(result.error)}</span>`;
+    } catch (error) {
+      status.innerHTML = `<span class="error-text">${escapeHtml(error.message)}</span>`;
+    }
+  });
+}
+
+async function serverStoppedOrWarn(server, action) {
+  if (await window.api.isRunning(server.id)) {
+    document.getElementById('modsStatus').innerHTML = `<span class="error-text">Detén el servidor antes de ${action}.</span>`;
+    return false;
+  }
+  return true;
+}
+
+async function setModsEnabledUi(server, fileNames, enabled) {
+  if (!(await serverStoppedOrWarn(server, enabled ? 'activar mods' : 'desactivar mods'))) return;
+  if (!enabled) {
+    const needed = modsUi.data.mods.filter((m) => fileNames.includes(m.fileName) && m.dependents.length);
+    if (needed.length && !confirm(`${needed.map((m) => `${m.name} lo necesitan: ${m.dependents.join(', ')}`).join('\n')}\n\nSi lo desactivas, esos mods no arrancarán. ¿Desactivar igualmente?`)) return;
+  }
+  const res = await window.api.setModsEnabled(server.id, fileNames, enabled);
+  const status = document.getElementById('modsStatus');
+  if (!res.ok) {
+    status.innerHTML = `<span class="error-text">${escapeHtml(res.error)}</span>`;
+    return;
+  }
+  // Los nombres cambian (.jar <-> .jar.disabled): se mantienen selección y detalle
+  for (const c of res.changed) {
+    if (modsUi.selected.delete(c.fileName)) modsUi.selected.add(c.newFileName);
+    if (modsUi.open === c.fileName) modsUi.open = c.newFileName;
+  }
+  status.innerHTML = res.failed.length
+    ? `<span class="error-text">No se pudo con: ${res.failed.map((f) => `${escapeHtml(f.fileName)} (${escapeHtml(f.error)})`).join(', ')}</span>`
+    : `${res.changed.length} mod(s) ${enabled ? 'activados' : 'desactivados'}. Se nota al arrancar el servidor.`;
+  await loadServerMods(server);
+}
+
+async function removeModsUi(server, fileNames) {
+  if (!(await serverStoppedOrWarn(server, 'quitar mods'))) return;
+  const needed = modsUi.data.mods.filter((m) => fileNames.includes(m.fileName) && m.dependents.length);
+  let msg = `Se quitarán ${fileNames.length} mod(s) del servidor. No se borran: van a una carpeta mods-quitados-<fecha>.`;
+  if (needed.length) msg += `\n\nOjo, otros mods los necesitan:\n${needed.map((m) => `${m.name}: ${m.dependents.join(', ')}`).join('\n')}`;
+  if (!confirm(`${msg}\n\n¿Continuar?`)) return;
+  const res = await window.api.removeServerMods(server.id, fileNames);
+  const status = document.getElementById('modsStatus');
+  if (!res.ok) {
+    status.innerHTML = `<span class="error-text">${escapeHtml(res.error)}</span>`;
+    return;
+  }
+  fileNames.forEach((f) => modsUi.selected.delete(f));
+  status.innerHTML = `${res.removed.length} mod(s) quitados.${res.asideDir ? ` Están en <code>${escapeHtml(res.asideDir)}</code>.` : ''}`;
+  await loadServerMods(server);
+}
+
+async function updateModsUi(server, fileNames) {
+  if (!(await serverStoppedOrWarn(server, 'actualizar mods'))) return;
+  const updates = modUpdatesFor(server);
+  const withDeps = fileNames.map((f) => updates.get(f)).filter((u) => u && u.missingDeps && u.missingDeps.length);
+  let msg = `Se actualizarán ${fileNames.length} mod(s). Antes se hará un backup completo del servidor y las versiones viejas se guardan en mods-antiguos-<fecha>.`;
+  if (withDeps.length) msg += `\n\nOjo: ${withDeps.map((u) => `${u.name} necesita ${u.missingDeps.join(', ')}`).join('; ')}.`;
+  if (!confirm(`${msg}\n\n¿Continuar?`)) return;
+  const status = document.getElementById('modsStatus');
+  const startTime = Date.now();
+  status.innerHTML = progressPlaceholder('Haciendo backup completo…');
+  window.api.onModUpdateProgress(server.id, (p) => {
+    if (p.phase === 'backup') renderProgressBar(status, p, startTime);
+    else if (p.phase === 'download') status.textContent = `Descargando ${p.index} de ${p.total}: ${p.name}…`;
+  });
+  try {
+    const res = await window.api.applyModUpdates(server.id, fileNames, { fullBackup: true });
+    if (!res.ok) {
+      status.innerHTML = `<span class="error-text">${escapeHtml(res.error)}</span>`;
+      return;
+    }
+    let html = `<span class="settings-status good">✓ ${res.updated.length} mod(s) actualizados.</span>`;
+    if (res.failed.length) html += ` <span class="error-text">Fallaron: ${res.failed.map((f) => `${escapeHtml(f.name)} (${escapeHtml(f.error)})`).join('; ')}</span>`;
+    html += ' Arranca el servidor para comprobarlo y que tus amigos actualicen con "Pasar mods con mi Minecraft".';
+    status.innerHTML = html;
+    for (const u of res.updated) {
+      if (modsUi.selected.delete(u.fileName)) modsUi.selected.add(u.newFileName);
+      if (modsUi.open === u.fileName) modsUi.open = u.newFileName;
+    }
+    delete modUpdateCache[server.id];
+    await loadServerMods(server);
+    checkServerModUpdates(server, { force: false, quiet: true });
+  } catch (error) {
+    status.innerHTML = `<span class="error-text">${escapeHtml(error.message)}</span>`;
+  } finally {
+    window.api.removeModUpdateProgressListeners(server.id);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// "Añadir mods": analizar una carpeta (lo que antes era "Preparar el servidor")
+// ---------------------------------------------------------------------------
+
+function renderAddModsView(server) {
+  const el = document.getElementById('tab-mods');
+  el.innerHTML = `
+    <div class="mods-head">
+      <div style="display:flex; align-items:center; gap:12px;">
+        <button type="button" class="btn btn-ghost" id="modsBack" aria-label="Volver a los mods del servidor">←</button>
+        <div>
+          <h2 class="mods-title">Añadir mods al servidor</h2>
+          <div class="hint">Elige una carpeta <code>mods</code> (la de tu Minecraft, un modpack descargado…) y te digo cuáles van en el servidor y cuáles son solo de cliente.</div>
+        </div>
+      </div>
+    </div>
     <div class="mods-toolbar">
-      <button id="pickModsBtn" class="btn btn-accent" ${isVanilla ? 'disabled' : ''}>Preparar el servidor</button>
-      <button id="compareClientBtn" class="btn btn-ghost" ${isVanilla ? 'disabled' : ''}>Comparar mi cliente con este servidor</button>
-      <button id="modUpdatesBtn" class="btn btn-ghost" ${isVanilla ? 'disabled' : ''}>Buscar actualizaciones de mods</button>
+      <button id="pickModsBtn" class="btn btn-accent">Elegir carpeta de mods</button>
       <span id="modsFolderLabel" class="hint"></span>
     </div>
-    <div id="modUpdatesBanner"></div>
     <div id="modsResult"></div>
   `;
-  if (isVanilla) return;
-
+  document.getElementById('modsBack').addEventListener('click', () => { modsUi.view = 'list'; renderMods(server); });
   document.getElementById('pickModsBtn').addEventListener('click', async () => {
     const folder = await window.api.pickModsFolder();
     if (!folder) return;
@@ -1806,413 +2251,307 @@ function renderMods(server) {
       btn.disabled = false;
     }
   });
-
-  document.getElementById('modUpdatesBtn').addEventListener('click', () => runModUpdateCheck(server, { force: true }));
-  autoCheckModUpdates(server);
-
-  document.getElementById('compareClientBtn').addEventListener('click', async () => {
-    const folder = await window.api.pickModsFolder();
-    if (!folder) return;
-    await runClientCompare(server, folder);
-  });
 }
 
 // ---------------------------------------------------------------------------
-// Actualizaciones de mods del servidor
+// Pantalla 2: pasar mods entre el servidor y tu Minecraft
 // ---------------------------------------------------------------------------
 
-// serverId -> { at, result }: la comprobación automática se hace como mucho una vez por hora.
-const modUpdateCache = {};
-let modUpdateIncludeBeta = false;
+const syncUi = { folder: null, label: null, original: null, rows: null, ops: [], showSame: false, instances: null, applied: null };
 
-async function autoCheckModUpdates(server) {
-  const cached = modUpdateCache[server.id];
-  let result = cached && Date.now() - cached.at < 60 * 60 * 1000 ? cached.result : null;
-  if (!result) {
-    try {
-      result = await window.api.checkModUpdates(server.id, false);
-    } catch (error) {
-      return;
-    }
-    if (!result || !result.ok) return;
-    modUpdateCache[server.id] = { at: Date.now(), result };
-  }
-  const banner = document.getElementById('modUpdatesBanner');
-  if (!banner || state.selectedId !== server.id) return;
-  if (result.updates.length > 0) {
-    banner.innerHTML = `<div class="mods-update-banner">Hay <strong>${result.updates.length}</strong> mod(s) del servidor con versión nueva para tu ${escapeHtml(LOADER_LABEL[result.loader] || result.loader)} ${escapeHtml(result.mcVersion)}. <button type="button" class="btn btn-accent btn-small" id="modUpdatesBannerBtn">Ver actualizaciones</button></div>`;
-    document.getElementById('modUpdatesBannerBtn').addEventListener('click', () => renderModUpdates(server, result));
-  } else {
-    banner.innerHTML = '';
-  }
-}
+const SYNC_KIND = {
+  missing: { text: 'Te falta', tone: 'warn', order: 0 },
+  missingOptional: { text: 'Te falta · opcional', tone: 'muted', order: 1 },
+  different: { text: 'Otra versión', tone: 'warn', order: 2 },
+  extra: { text: 'El servidor no lo tiene', tone: 'bad', order: 3 },
+  serverOnlyInClient: { text: 'Solo servidor: te sobra', tone: 'bad', order: 4 },
+  clientInServer: { text: 'Solo cliente: sobra en el servidor', tone: 'bad', order: 4 },
+  fineClient: { text: 'Solo cliente · bien', tone: 'muted', order: 6 },
+  fineServer: { text: 'Solo servidor · bien', tone: 'muted', order: 6 },
+  same: { text: 'Igual', tone: 'ok', order: 7 },
+};
 
-async function runModUpdateCheck(server, { force = false } = {}) {
-  const resultEl = document.getElementById('modsResult');
-  const btn = document.getElementById('modUpdatesBtn');
-  document.getElementById('modsFolderLabel').textContent = '';
-  resultEl.innerHTML = '<p class="hint">Comprobando cada mod del servidor en Modrinth y CurseForge… (con muchos mods tarda un poco)</p>';
-  if (btn) btn.disabled = true;
-  try {
-    const result = await window.api.checkModUpdates(server.id, modUpdateIncludeBeta);
-    if (!result.ok) {
-      resultEl.innerHTML = `<p class="error-text">${escapeHtml(result.error)}</p>`;
-      return;
-    }
-    if (!modUpdateIncludeBeta) modUpdateCache[server.id] = { at: Date.now(), result };
-    renderModUpdates(server, result);
-  } catch (error) {
-    resultEl.innerHTML = `<p class="error-text">${escapeHtml(error.message)}</p>`;
-  } finally {
-    if (btn) btn.disabled = false;
-  }
-}
-
-function renderModUpdates(server, r) {
-  const container = document.getElementById('modsResult');
-  const banner = document.getElementById('modUpdatesBanner');
-  if (banner) banner.innerHTML = '';
-  const notes = [];
-  for (const w of r.warnings || []) {
-    if (w === 'curseforge-sin-clave') {
-      notes.push('<p class="hint mods-note">Los mods que solo están en CurseForge no se pueden comprobar sin tu clave de API: ponla en <a href="#" id="modsOpenSettings">Ajustes</a>.</p>');
-    } else {
-      notes.push(`<p class="error-text mods-note">${escapeHtml(w)}</p>`);
-    }
-  }
-  const unknown = (r.notOnModrinth || []).length;
-
-  const rows = r.updates.map((u, i) => {
-    const badges = [
-      `<span class="badge ${u.source === 'curseforge' ? 'badge-full' : 'badge-world'}">${u.source === 'curseforge' ? 'CurseForge' : 'Modrinth'}</span>`,
-      u.versionType && u.versionType !== 'release' ? `<span class="badge badge-unknown">${escapeHtml(u.versionType)}</span>` : '',
-    ].join(' ');
-    const warn = [];
-    if (u.missingDeps && u.missingDeps.length) warn.push(`<span class="error-text">Necesita también: ${u.missingDeps.map(escapeHtml).join(', ')}</span>`);
-    if (!u.canDownload) warn.push('<span class="error-text">El autor no deja descargarlo desde otras apps: bájalo a mano desde su página.</span>');
-    return `
-      <tr>
-        <td><input type="checkbox" class="modUpd" data-i="${i}" ${u.canDownload ? 'checked' : 'disabled'} /></td>
-        <td>${escapeHtml(u.name)}<br><span class="hint mod-file">${escapeHtml(u.fileName)} → ${escapeHtml(u.newFileName || '')}</span>${warn.length ? `<br>${warn.join('<br>')}` : ''}</td>
-        <td><span class="mod-file">${escapeHtml(u.currentVersion)}</span> → <strong>${escapeHtml(u.newVersion)}</strong></td>
-        <td>${badges}</td>
-        <td>${u.url ? `<a href="${escapeHtml(u.url)}" target="_blank" rel="noopener">Ver cambios</a>` : ''}</td>
-      </tr>`;
-  }).join('');
-
-  container.innerHTML = `
-    ${notes.join('')}
-    <p class="hint">Comprobados ${r.checked} mods para ${escapeHtml(LOADER_LABEL[r.loader] || r.loader)} · Minecraft ${escapeHtml(r.mcVersion)}${unknown ? ` · ${unknown} no se han podido identificar` : ''}.</p>
-    <div class="field field-inline">
-      <input type="checkbox" id="modUpdBeta" ${modUpdateIncludeBeta ? 'checked' : ''} />
-      <label for="modUpdBeta">Incluir versiones beta/alpha (por defecto solo estables)</label>
+async function renderSyncView(server) {
+  const el = document.getElementById('tab-mods');
+  el.innerHTML = `
+    <div class="mods-head">
+      <div style="display:flex; align-items:center; gap:12px;">
+        <button type="button" class="btn btn-ghost" id="modsBack" aria-label="Volver a los mods del servidor">←</button>
+        <div>
+          <h2 class="mods-title">Pasar mods entre el servidor y tu Minecraft</h2>
+          <div class="hint">Cada fila es un mod; a cada lado, si está en esa carpeta y en qué versión. No se toca nada hasta que pulses Aplicar.</div>
+        </div>
+      </div>
+      <div class="mods-head-actions">
+        <button type="button" class="btn btn-ghost" id="syncCopyAll">Copiar a mi Minecraft todo lo que falta</button>
+        <button type="button" class="btn btn-ghost" id="syncToggleSame"></button>
+        <button type="button" class="btn btn-ghost" id="syncPackZip">ZIP para tus amigos</button>
+      </div>
     </div>
-    ${r.updates.length === 0
-      ? '<p class="settings-status good" style="margin-top:12px;">✓ Todos los mods que se pueden comprobar están en su última versión.</p>'
-      : `
-    <h3 style="margin-top:14px;">Con versión nueva (${r.updates.length})</h3>
-    <div class="mods-select-bar">
-      <button type="button" class="btn btn-ghost btn-small" data-select-all="modUpd">Marcar todos</button>
-      <button type="button" class="btn btn-ghost btn-small" data-select-none="modUpd">Desmarcar todos</button>
-      <span class="hint" data-count="modUpd"></span>
+    <div class="sync-grid sync-sides">
+      <div class="sync-side-card">
+        <div class="sync-side-title"><strong>Servidor · ${escapeHtml(server.name)}</strong><span class="hint" id="syncServerCount"></span></div>
+        <span class="mod-file" id="syncServerPath"></span>
+      </div>
+      <div class="sync-arrows" aria-hidden="true">⇄</div>
+      <div class="sync-side-card">
+        <div class="sync-side-title">
+          <label for="syncClientPick"><strong>Tu Minecraft</strong></label>
+          <select id="syncClientPick"><option value="">Buscando instancias…</option></select>
+          <span class="hint" id="syncClientCount"></span>
+        </div>
+        <span class="mod-file" id="syncClientPath"></span>
+      </div>
     </div>
-    <table class="mods-table">
-      <thead><tr><th></th><th>Mod</th><th>Versión</th><th>Origen</th><th></th></tr></thead>
-      <tbody>${rows}</tbody>
-    </table>
-    <div class="field field-inline" style="margin-top:12px;">
-      <input type="checkbox" id="modUpdBackup" checked />
-      <label for="modUpdBackup">Hacer un backup completo antes (recomendado: algunos mods cambian el mundo al actualizarse)</label>
-    </div>
-    <p class="hint">Las versiones viejas no se borran: se mueven a <code>mods-antiguos-&lt;fecha&gt;</code> en la carpeta del servidor. Tus amigos tendrán que tener las mismas versiones: luego usa "Comparar mi cliente con este servidor" o pásales el ZIP de cliente.</p>
-    <div class="backup-actions"><button id="modUpdApply" class="btn btn-accent">Actualizar los marcados</button></div>`}
-    <div id="modUpdResult" class="hint" style="margin-top:12px;"></div>
+    <div class="mods-chips" id="syncSummary" style="margin-top:12px;"></div>
+    <div id="syncRows" class="sync-rows"><p class="hint">Elige tu Minecraft arriba.</p></div>
+    <div class="sync-pending" id="syncPending"></div>
   `;
+  document.getElementById('modsBack').addEventListener('click', () => { modsUi.view = 'list'; renderMods(server); });
+  document.getElementById('syncCopyAll').addEventListener('click', () => syncCopyAllMissing(server));
+  document.getElementById('syncToggleSame').addEventListener('click', () => { syncUi.showSame = !syncUi.showSame; renderSyncRows(server); });
+  document.getElementById('syncPackZip').addEventListener('click', () => syncPackZip(server));
 
-  const settingsLink = document.getElementById('modsOpenSettings');
-  if (settingsLink) settingsLink.addEventListener('click', (event) => { event.preventDefault(); openSettings(); });
-  document.getElementById('modUpdBeta').addEventListener('change', (e) => {
-    modUpdateIncludeBeta = e.target.checked;
-    runModUpdateCheck(server, { force: true });
-  });
-
-  const updateCount = () => {
-    const boxes = [...container.querySelectorAll('.modUpd:not(:disabled)')];
-    const label = container.querySelector('[data-count="modUpd"]');
-    if (label) label.textContent = `${boxes.filter((b) => b.checked).length} de ${boxes.length} marcados`;
-  };
-  container.querySelectorAll('.modUpd').forEach((b) => b.addEventListener('change', updateCount));
-  container.querySelectorAll('[data-select-all="modUpd"], [data-select-none="modUpd"]').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      container.querySelectorAll('.modUpd:not(:disabled)').forEach((b) => { b.checked = Boolean(btn.dataset.selectAll); });
-      updateCount();
-    });
-  });
-  updateCount();
-
-  const apply = document.getElementById('modUpdApply');
-  if (!apply) return;
-  apply.addEventListener('click', async () => {
-    const out = document.getElementById('modUpdResult');
-    const chosen = [...container.querySelectorAll('.modUpd:checked')].map((b) => r.updates[Number(b.dataset.i)]);
-    if (chosen.length === 0) {
-      out.innerHTML = '<span class="error-text">No hay ningún mod marcado.</span>';
-      return;
-    }
-    if (await window.api.isRunning(server.id)) {
-      out.innerHTML = '<span class="error-text">Detén el servidor antes de actualizar mods.</span>';
-      return;
-    }
-    const withDeps = chosen.filter((u) => u.missingDeps && u.missingDeps.length);
-    let msg = `Se actualizarán ${chosen.length} mod(s).`;
-    if (withDeps.length) msg += `\n\nOjo: ${withDeps.map((u) => u.name).join(', ')} necesita(n) mods que no tienes; tendrás que añadirlos o el servidor no arrancará.`;
-    if (!confirm(`${msg}\n\n¿Continuar?`)) return;
-
-    apply.disabled = true;
-    const fullBackup = document.getElementById('modUpdBackup').checked;
-    const startTime = Date.now();
-    out.innerHTML = progressPlaceholder(fullBackup ? 'Haciendo backup completo…' : 'Descargando…');
-    window.api.onModUpdateProgress(server.id, (p) => {
-      if (p.phase === 'backup') renderProgressBar(out, p, startTime);
-      else if (p.phase === 'download') out.textContent = `Descargando ${p.index} de ${p.total}: ${p.name}…`;
-    });
+  const pick = document.getElementById('syncClientPick');
+  if (!syncUi.instances) {
     try {
-      const res = await window.api.applyModUpdates(server.id, chosen.map((u) => u.fileName), { fullBackup, includeBeta: modUpdateIncludeBeta });
-      if (!res.ok) {
-        out.innerHTML = `<span class="error-text">${escapeHtml(res.error)}</span>`;
-        return;
-      }
-      let html = `<span class="settings-status good">✓ ${res.updated.length} mod(s) actualizados.</span>`;
-      if (res.backupFileName) html += ` Backup previo: <code>${escapeHtml(res.backupFileName)}</code>.`;
-      if (res.asideDir) html += `<br>Las versiones viejas están en <code>${escapeHtml(res.asideDir)}</code>.`;
-      if (res.failed.length) {
-        html += `<br><span class="error-text">No se pudieron actualizar: ${res.failed.map((f) => `${escapeHtml(f.name)} (${escapeHtml(f.error)})`).join('; ')}</span>`;
-      }
-      html += '<br>Arranca el servidor para comprobar que todo carga bien. Después, que tus amigos actualicen también (pestaña Mods → "Comparar mi cliente con este servidor").';
-      delete modUpdateCache[server.id];
-      out.innerHTML = html;
+      const info = await window.api.getLocalWorldInfo(server.id);
+      syncUi.instances = info.ok ? info.instances : [];
     } catch (error) {
-      out.innerHTML = `<span class="error-text">${escapeHtml(error.message)}</span>`;
-    } finally {
-      window.api.removeModUpdateProgressListeners(server.id);
-      apply.disabled = false;
+      syncUi.instances = [];
     }
+  }
+  // Separador de rutas del propio PC donde están las carpetas (no del navegador)
+  const join = (base, name) => `${base}${base.includes('\\') ? '\\' : '/'}${name}`;
+  const options = syncUi.instances.map((i) => ({ value: join(i.path, 'mods'), label: `${i.label}${i.mods ? ` · ${i.mods} mods` : ''}` }));
+  if (syncUi.folder && !options.some((o) => o.value === syncUi.folder)) options.unshift({ value: syncUi.folder, label: syncUi.label || syncUi.folder });
+  pick.innerHTML = options.map((o) => `<option value="${escapeHtml(o.value)}">${escapeHtml(o.label)}</option>`).join('') + '<option value="__otra">Otra carpeta…</option>';
+  if (!syncUi.folder && options[0]) syncUi.folder = options[0].value;
+  if (syncUi.folder) pick.value = syncUi.folder;
+  pick.addEventListener('change', async () => {
+    if (pick.value === '__otra') {
+      const folder = await window.api.pickModsFolder();
+      if (!folder) { pick.value = syncUi.folder || ''; return; }
+      syncUi.folder = folder;
+      syncUi.label = folder;
+      renderSyncView(server);
+      return;
+    }
+    syncUi.folder = pick.value;
+    syncUi.label = pick.selectedOptions[0].textContent;
+    loadSync(server);
   });
+  if (syncUi.folder) loadSync(server);
+  else document.getElementById('syncRows').innerHTML = '<p class="hint">No he encontrado tu Minecraft automáticamente: elige "Otra carpeta…" y busca la carpeta <code>mods</code> de tu instancia.</p>';
 }
 
-// ---------------------------------------------------------------------------
-// Comparar un cliente con el servidor
-// ---------------------------------------------------------------------------
-
-let lastClientCompare = null;
-
-async function runClientCompare(server, folder) {
-  const resultEl = document.getElementById('modsResult');
-  const buttons = [document.getElementById('pickModsBtn'), document.getElementById('compareClientBtn')];
-  document.getElementById('modsFolderLabel').textContent = folder;
-  resultEl.innerHTML = '<p class="hint">Comparando los mods de tu cliente con los del servidor… (con muchos mods puede tardar un poco)</p>';
-  buttons.forEach((b) => (b.disabled = true));
+async function loadSync(server) {
+  const rowsEl = document.getElementById('syncRows');
+  document.getElementById('syncClientPath').textContent = syncUi.folder;
+  rowsEl.innerHTML = '<p class="hint">Comparando las dos carpetas… (con muchos mods tarda un poco)</p>';
+  let res;
   try {
-    const res = await window.api.compareClientMods(folder, server.id);
-    if (!res.ok) {
-      resultEl.innerHTML = `<p class="error-text">${escapeHtml(res.error)}</p>`;
-      return;
-    }
-    lastClientCompare = { ...res, folder };
-    renderClientCompare(server);
+    res = await window.api.compareClientMods(syncUi.folder, server.id);
   } catch (error) {
-    resultEl.innerHTML = `<p class="error-text">${escapeHtml(error.message)}</p>`;
-  } finally {
-    buttons.forEach((b) => (b.disabled = false));
+    res = { ok: false, error: error.message };
+  }
+  if (state.selectedId !== server.id || modsUi.view !== 'sync') return;
+  if (!res.ok) {
+    rowsEl.innerHTML = `<p class="error-text">${escapeHtml(res.error)}</p>`;
+    return;
+  }
+  syncUi.original = res.rows.map((r) => ({ ...r }));
+  syncUi.rows = res.rows.map((r) => ({ ...r }));
+  syncUi.ops = [];
+  syncUi.applied = null;
+  syncUi.warnings = res.warnings || [];
+  document.getElementById('syncServerPath').textContent = res.serverModsDir;
+  renderSyncRows(server);
+}
+
+function syncChange(server, key, patch, op) {
+  syncUi.rows = syncUi.rows.map((r) => (r.key === key ? { ...r, ...patch } : r)).filter((r) => r.server || r.client);
+  syncUi.ops.push(op);
+  syncUi.applied = null;
+  renderSyncRows(server);
+}
+
+function syncActionsFor(server, r) {
+  const actions = [];
+  const name = r.name;
+  if (r.kind === 'missing' || r.kind === 'missingOptional') {
+    actions.push({ dir: 'toClient', label: `Copiar a tu Minecraft ${name}`, run: () => syncChange(server, r.key, { client: { ...r.server }, kind: 'same' }, { type: 'copy', file: r.server.fileName, text: `Copiar ${name} a tu Minecraft` }) });
+  }
+  if (r.kind === 'different') {
+    actions.push({ dir: 'toServer', label: `Poner en el servidor tu versión de ${name}`, run: () => syncChange(server, r.key, { server: { ...r.client }, kind: 'same' }, { type: 'toServerReplace', clientFile: r.client.fileName, serverFile: r.server.fileName, text: `${name}: servidor ${r.server.version || ''} → ${r.client.version || 'tu versión'}` }) });
+    actions.push({ dir: 'toClient', label: `Poner en tu Minecraft la versión del servidor de ${name}`, run: () => syncChange(server, r.key, { client: { ...r.server }, kind: 'same' }, { type: 'replace', client: r.client.fileName, server: r.server.fileName, text: `${name}: tu ${r.client.version || ''} → ${r.server.version || 'la del servidor'}` }) });
+  }
+  if (r.kind === 'extra') {
+    actions.push({ dir: 'toServer', label: `Copiar al servidor ${name}`, run: () => syncChange(server, r.key, { server: { ...r.client }, kind: 'same' }, { type: 'toServer', file: r.client.fileName, text: `Copiar ${name} al servidor` }) });
+  }
+  if (r.kind === 'extra' || r.kind === 'serverOnlyInClient') {
+    actions.push({ dir: 'removeClient', label: `Quitar de tu Minecraft ${name}`, run: () => syncChange(server, r.key, { client: null, kind: r.server ? 'fineServer' : r.kind }, { type: 'remove', file: r.client.fileName, text: `Quitar ${name} de tu Minecraft` }) });
+  }
+  if (r.kind === 'clientInServer') {
+    actions.push({ dir: 'removeServer', label: `Quitar del servidor ${name}`, run: () => syncChange(server, r.key, { server: null, kind: r.client ? 'fineClient' : r.kind }, { type: 'removeServer', file: r.server.fileName, text: `Quitar ${name} del servidor` }) });
+  }
+  return actions;
+}
+
+const SYNC_ICONS = {
+  toClient: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"></path></svg>',
+  toServer: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 12H5M11 6l-6 6 6 6"></path></svg>',
+  removeClient: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg>',
+};
+SYNC_ICONS.removeServer = SYNC_ICONS.removeClient;
+
+function syncCell(sideData, name, emptyText, highlight) {
+  if (!sideData) return `<div class="sync-cell empty"><span class="hint">${emptyText}</span></div>`;
+  return `<div class="sync-cell${highlight ? ` ${highlight}` : ''}">
+      <span class="sync-cell-top"><span class="sync-cell-name">${escapeHtml(name)}</span>${sideData.version ? `<span class="sync-ver">${escapeHtml(sideData.version)}</span>` : ''}</span>
+      <span class="mod-file">${escapeHtml(sideData.fileName)}</span>
+    </div>`;
+}
+
+function renderSyncRows(server) {
+  const rowsEl = document.getElementById('syncRows');
+  if (!rowsEl || !syncUi.rows) return;
+  const rows = syncUi.rows;
+  const count = (k) => rows.filter((r) => r.kind === k).length;
+  document.getElementById('syncServerCount').textContent = `${rows.filter((r) => r.server).length} mods`;
+  document.getElementById('syncClientCount').textContent = `${rows.filter((r) => r.client).length} mods`;
+  document.getElementById('syncToggleSame').textContent = syncUi.showSame ? 'Ocultar los iguales' : 'Mostrar también los iguales';
+
+  const summary = [
+    [`${count('missing')} te faltan`, count('missing') ? 'warn' : 'muted'],
+    [`${count('different')} en otra versión`, count('different') ? 'warn' : 'muted'],
+    [`${count('extra') + count('serverOnlyInClient')} te sobran`, count('extra') + count('serverOnlyInClient') ? 'bad' : 'muted'],
+    [`${count('clientInServer')} sobran en el servidor`, count('clientInServer') ? 'bad' : 'muted'],
+    [`${count('same')} iguales`, 'ok'],
+  ];
+  document.getElementById('syncSummary').innerHTML =
+    summary.map(([t, tone]) => `<span class="mods-status ${tone} big">${escapeHtml(t)}</span>`).join('') +
+    (syncUi.warnings && syncUi.warnings.includes('curseforge-sin-clave') ? '<span class="hint">Sin clave de CurseForge, algunos mods salen sin identificar.</span>' : '');
+
+  const visible = rows
+    .filter((r) => syncUi.showSame || r.kind !== 'same')
+    .sort((a, b) => SYNC_KIND[a.kind].order - SYNC_KIND[b.kind].order || a.name.localeCompare(b.name));
+  const hiddenSame = syncUi.showSame ? 0 : count('same');
+
+  rowsEl.innerHTML = visible.length === 0 && !hiddenSame
+    ? '<p class="hint">No hay mods en ninguna de las dos carpetas.</p>'
+    : visible
+        .map((r, i) => {
+          const kind = SYNC_KIND[r.kind];
+          const diff = r.kind === 'different';
+          const actions = syncActionsFor(server, r);
+          return `
+          <div class="sync-grid sync-row">
+            ${syncCell(r.server, r.name, 'No está en el servidor', r.kind === 'missing' || diff ? 'accent' : r.kind === 'clientInServer' ? 'danger' : '')}
+            <div class="sync-mid">
+              <span class="mods-status ${kind.tone}">${escapeHtml(kind.text)}${r.needUnknown && r.kind === 'missing' ? ' (revisar)' : ''}</span>
+              <div class="sync-buttons">
+                ${actions.map((a, j) => `<button type="button" class="sync-btn ${a.dir}" data-row="${i}" data-act="${j}" aria-label="${escapeHtml(a.label)}" title="${escapeHtml(a.label)}">${SYNC_ICONS[a.dir]}</button>`).join('')}
+              </div>
+            </div>
+            ${syncCell(r.client, r.name, 'No está en tu Minecraft', diff ? 'accent' : r.kind === 'extra' || r.kind === 'serverOnlyInClient' ? 'danger' : '')}
+          </div>`;
+        })
+        .join('') +
+      (hiddenSame ? `<button type="button" class="sync-show-same" id="syncShowSame">+ ${hiddenSame} mods iguales en los dos lados</button>` : '');
+
+  rowsEl.querySelectorAll('[data-act]').forEach((b) =>
+    b.addEventListener('click', () => syncActionsFor(server, visible[Number(b.dataset.row)])[Number(b.dataset.act)].run())
+  );
+  const showSame = document.getElementById('syncShowSame');
+  if (showSame) showSame.addEventListener('click', () => { syncUi.showSame = true; renderSyncRows(server); });
+  renderSyncPending(server);
+}
+
+function renderSyncPending(server) {
+  const el = document.getElementById('syncPending');
+  const n = syncUi.ops.length;
+  const title = syncUi.applied ? syncUi.applied : n ? `${n} cambio(s) pendiente(s)` : 'Sin cambios pendientes';
+  const detail = n
+    ? syncUi.ops.map((o) => o.text).join(' · ')
+    : syncUi.applied
+      ? 'Cierra y abre Minecraft para que coja los cambios.'
+      : 'Usa las flechas para pasar un mod de un lado a otro, o la ✕ para quitarlo.';
+  el.innerHTML = `
+    <div class="sync-pending-text"><strong>${title}</strong><span class="hint">${escapeHtml(detail)}</span></div>
+    <div class="mods-head-actions">
+      <button type="button" class="btn btn-ghost" id="syncUndo" ${n ? '' : 'disabled'}>Deshacer todo</button>
+      <button type="button" class="btn btn-accent" id="syncApply" ${n ? '' : 'disabled'}>Aplicar cambios</button>
+    </div>`;
+  document.getElementById('syncUndo').addEventListener('click', () => {
+    syncUi.rows = syncUi.original.map((r) => ({ ...r }));
+    syncUi.ops = [];
+    renderSyncRows(server);
+  });
+  document.getElementById('syncApply').addEventListener('click', () => applySync(server));
+}
+
+function syncCopyAllMissing(server) {
+  if (!syncUi.rows) return;
+  for (const r of [...syncUi.rows]) {
+    if (r.kind === 'missing') syncActionsFor(server, r)[0].run();
+    else if (r.kind === 'different') syncActionsFor(server, r).find((a) => a.dir === 'toClient').run();
   }
 }
 
-function modLinks(m) {
-  const out = [];
-  if (m.modrinthUrl) out.push(`<a href="${escapeHtml(m.modrinthUrl)}" target="_blank" rel="noopener">Modrinth</a>`);
-  if (m.curseforgeUrl) out.push(`<a href="${escapeHtml(m.curseforgeUrl)}" target="_blank" rel="noopener">CurseForge</a>`);
-  return out.join(' · ') || '—';
+async function applySync(server) {
+  const changes = { copy: [], replace: [], remove: [], toServer: [], removeServer: [] };
+  for (const o of syncUi.ops) {
+    if (o.type === 'copy') changes.copy.push(o.file);
+    else if (o.type === 'replace') changes.replace.push({ client: o.client, server: o.server });
+    else if (o.type === 'remove') changes.remove.push(o.file);
+    else if (o.type === 'toServer') changes.toServer.push(o.file);
+    else if (o.type === 'toServerReplace') { changes.toServer.push(o.clientFile); changes.removeServer.push(o.serverFile); }
+    else if (o.type === 'removeServer') changes.removeServer.push(o.file);
+  }
+  const touchesServer = changes.toServer.length || changes.removeServer.length;
+  if (touchesServer && (await window.api.isRunning(server.id))) {
+    alert('Hay cambios en el servidor: detenlo antes de aplicar.');
+    return;
+  }
+  if (!confirm(`Se aplicarán ${syncUi.ops.length} cambio(s). Lo que se quita o se sustituye no se borra: se mueve a una carpeta mods-quitados-<fecha>.\n\nCierra Minecraft antes. ¿Continuar?`)) return;
+  const btn = document.getElementById('syncApply');
+  btn.disabled = true;
+  let res;
+  try {
+    res = await window.api.applyClientSync(syncUi.folder, server.id, changes);
+  } catch (error) {
+    res = { ok: false, error: error.message };
+  }
+  if (!res.ok) {
+    alert(`No se pudo aplicar: ${res.error}`);
+    btn.disabled = false;
+    return;
+  }
+  const parts = [`✓ Hecho`];
+  if (res.failed.length) parts.push(`(fallaron ${res.failed.length}: ${res.failed.map((f) => f.fileName).join(', ')})`);
+  const where = [res.asideDir, res.serverAsideDir].filter(Boolean);
+  if (where.length) parts.push(`· lo quitado está en ${where.join(' y ')}`);
+  delete modUpdateCache[server.id];
+  await loadSync(server);
+  syncUi.applied = parts.join(' ');
+  renderSyncPending(server);
 }
 
-function modCell(m) {
-  return `${escapeHtml(m.name)}${m.name !== m.fileName ? `<br><span class="hint mod-file">${escapeHtml(m.fileName)}</span>` : ''}`;
-}
-
-function renderClientCompare(server) {
-  const container = document.getElementById('modsResult');
-  const r = lastClientCompare;
-  const needBadge = {
-    required: '<span class="badge badge-needed">Necesario</span>',
-    optional: '<span class="badge">Opcional</span>',
-    unknown: '<span class="badge badge-unknown" title="No se sabe si hace falta en el cliente; la mayoría de mods de contenido sí">Revisar</span>',
-  };
-
-  const section = ({ key, title, intro, rows, head, checkedByDefault = true, cls }) => {
-    if (rows.length === 0) return '';
-    return `
-      <h3 style="margin-top:22px;">${title} (${rows.length})</h3>
-      ${intro ? `<p class="hint" style="margin-top:0;">${intro}</p>` : ''}
-      ${cls ? `
-      <div class="mods-select-bar">
-        <button type="button" class="btn btn-ghost btn-small" data-select-all="${cls}">Marcar todos</button>
-        <button type="button" class="btn btn-ghost btn-small" data-select-none="${cls}">Desmarcar todos</button>
-        <span class="hint" data-count="${cls}"></span>
-      </div>` : ''}
-      <table class="mods-table" data-section="${key}">
-        <thead><tr>${cls ? '<th></th>' : ''}${head}</tr></thead>
-        <tbody>${rows.map((row, i) => `<tr>${cls ? `<td><input type="checkbox" class="${cls}" data-i="${i}" ${(typeof checkedByDefault === 'function' ? checkedByDefault(row) : checkedByDefault) ? 'checked' : ''} /></td>` : ''}${row.cells}</tr>`).join('')}</tbody>
-      </table>`;
-  };
-
-  const notes = [];
-  if ((r.warnings || []).includes('curseforge-sin-clave')) {
-    notes.push('<p class="hint mods-note">Sin clave de CurseForge, los mods que solo están allí salen como "Revisar". Puedes ponerla en <a href="#" id="modsOpenSettings">Ajustes</a>.</p>');
+async function syncPackZip(server) {
+  if (!syncUi.rows) return;
+  const needed = syncUi.original.filter((r) => r.server && ['same', 'missing', 'different'].includes(r.kind));
+  const files = needed.map((r) => ({ file: r.server.file, fileName: r.server.fileName }));
+  const el = document.getElementById('syncPending');
+  try {
+    const result = await window.api.exportModsZip(server.id, files);
+    if (result.canceled) return;
+    alert(result.ok
+      ? `ZIP creado con ${result.count} mods (${(result.size / 1024 / 1024).toFixed(1)} MB): todos los mods del servidor que hacen falta para jugar. Tus amigos lo descomprimen en su carpeta mods.`
+      : `Error: ${result.error}`);
+  } catch (error) {
+    if (el) alert(`Error: ${error.message}`);
   }
-  for (const w of (r.warnings || []).filter((w) => w !== 'curseforge-sin-clave')) {
-    notes.push(`<p class="error-text mods-note">${escapeHtml(w)}</p>`);
-  }
-
-  const problems = r.missing.filter((m) => m.need !== 'optional').length + r.different.length + r.serverOnly.length + r.notOnServer.length;
-  const summary = problems === 0
-    ? '<p class="settings-status good">✓ Tu cliente coincide con el servidor: puedes entrar a jugar.</p>'
-    : `<p class="hint">${r.same.length} iguales · <strong>${r.missing.length}</strong> faltan · <strong>${r.different.length}</strong> en otra versión · <strong>${r.serverOnly.length}</strong> solo de servidor · <strong>${r.notOnServer.length}</strong> no están en el servidor · ${r.clientOnly.length} solo de cliente</p>`;
-
-  container.innerHTML = `
-    ${notes.join('')}
-    ${summary}
-    ${section({
-      key: 'missing', cls: 'syncMissing', title: 'Te faltan (el servidor los tiene)',
-      intro: 'Sin los "Necesario" no podrás entrar. Los "Opcional" no hacen falta. Los "Revisar" no se sabe seguro: casi siempre hacen falta.',
-      head: '<th>Mod</th><th>En el cliente</th><th></th>',
-      checkedByDefault: (row) => row.m.need !== 'optional',
-      rows: r.missing.map((m) => ({ m, cells: `<td>${modCell(m)}</td><td>${needBadge[m.need] || ''}</td><td>${modLinks(m)}</td>` })),
-    })}
-    ${section({
-      key: 'different', cls: 'syncReplace', title: 'En otra versión que el servidor',
-      intro: 'Se cambia tu versión por la del servidor (la tuya se aparta, no se borra).',
-      head: '<th>Mod</th><th>Tú tienes</th><th>El servidor tiene</th>',
-      rows: r.different.map((m) => ({ m, cells: `<td>${escapeHtml(m.name)}</td><td class="mod-file">${escapeHtml(m.fileName)}</td><td class="mod-file">${escapeHtml(m.server.fileName)}</td>` })),
-    })}
-    ${section({
-      key: 'serverOnly', cls: 'syncRemove', title: 'Solo de servidor (te sobran)',
-      intro: 'Estos mods solo funcionan en el servidor; en tu Minecraft no hacen nada o dan error.',
-      head: '<th>Mod</th><th></th>',
-      rows: r.serverOnly.map((m) => ({ m, cells: `<td>${modCell(m)}</td><td>${modLinks(m)}</td>` })),
-    })}
-    ${section({
-      key: 'notOnServer', cls: 'syncExtra', title: 'Los tienes tú, pero el servidor no',
-      intro: 'Si son mods de contenido (bloques, objetos, criaturas), el servidor te echará al entrar: quítalos o añádelos al servidor. Si son de interfaz o rendimiento, no pasa nada. Por eso salen desmarcados.',
-      head: '<th>Mod</th><th></th>',
-      checkedByDefault: false,
-      rows: r.notOnServer.map((m) => ({ m, cells: `<td>${modCell(m)}</td><td>${modLinks(m)}</td>` })),
-    })}
-    ${section({
-      key: 'clientOnly', title: 'Solo de cliente (están bien)',
-      intro: 'Mods de gráficos, interfaz, minimapa… No van en el servidor y no molestan para entrar.',
-      head: '<th>Mod</th><th></th>',
-      rows: r.clientOnly.map((m) => ({ m, cells: `<td>${modCell(m)}</td><td>${modLinks(m)}</td>` })),
-    })}
-
-    <div style="display:flex; gap:10px; flex-wrap:wrap; margin-top:18px;">
-      ${problems > 0 || r.missing.length > 0 ? '<button id="applyClientSyncBtn" class="btn btn-accent">Arreglar mi cliente con lo marcado</button>' : ''}
-      <button id="clientPackZipBtn" class="btn btn-ghost">ZIP con los mods que necesita un cliente (para tus amigos)</button>
-    </div>
-    <div id="clientSyncResult" class="hint" style="margin-top:14px;"></div>
-  `;
-
-  const settingsLink = document.getElementById('modsOpenSettings');
-  if (settingsLink) settingsLink.addEventListener('click', (event) => { event.preventDefault(); openSettings(); });
-
-  const updateCount = (cls) => {
-    const boxes = [...container.querySelectorAll(`.${cls}`)];
-    const label = container.querySelector(`[data-count="${cls}"]`);
-    if (label) label.textContent = `${boxes.filter((b) => b.checked).length} de ${boxes.length} marcados`;
-  };
-  for (const cls of ['syncMissing', 'syncReplace', 'syncRemove', 'syncExtra']) {
-    container.querySelectorAll(`.${cls}`).forEach((box) => box.addEventListener('change', () => updateCount(cls)));
-    updateCount(cls);
-  }
-  container.querySelectorAll('[data-select-all], [data-select-none]').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      const cls = btn.dataset.selectAll || btn.dataset.selectNone;
-      container.querySelectorAll(`.${cls}`).forEach((box) => { box.checked = Boolean(btn.dataset.selectAll); });
-      updateCount(cls);
-    });
-  });
-
-  const checked = (cls, list) => [...container.querySelectorAll(`.${cls}`)].filter((b) => b.checked).map((b) => list[Number(b.dataset.i)]);
-  const out = document.getElementById('clientSyncResult');
-
-  const applyBtn = document.getElementById('applyClientSyncBtn');
-  if (applyBtn) applyBtn.addEventListener('click', async () => {
-    const changes = {
-      copy: checked('syncMissing', r.missing).map((m) => m.fileName),
-      replace: checked('syncReplace', r.different).map((m) => ({ client: m.fileName, server: m.server.fileName })),
-      remove: [...checked('syncRemove', r.serverOnly), ...checked('syncExtra', r.notOnServer)].map((m) => m.fileName),
-    };
-    const total = changes.copy.length + changes.replace.length + changes.remove.length;
-    if (total === 0) {
-      out.innerHTML = '<span class="error-text">No hay nada marcado.</span>';
-      return;
-    }
-    const ok = confirm(
-      `En tu carpeta de mods del cliente:\n\n` +
-        `• Copiar del servidor: ${changes.copy.length}\n` +
-        `• Cambiar a la versión del servidor: ${changes.replace.length}\n` +
-        `• Quitar: ${changes.remove.length}\n\n` +
-        'Lo que se quita o se sustituye no se borra: se mueve a una carpeta "mods-quitados-<fecha>" junto a tu carpeta de mods.\n\n' +
-        'Cierra Minecraft antes de continuar. ¿Seguir?'
-    );
-    if (!ok) return;
-    applyBtn.disabled = true;
-    out.textContent = 'Aplicando…';
-    try {
-      const res = await window.api.applyClientSync(r.folder, server.id, changes);
-      if (!res.ok) {
-        out.innerHTML = `<span class="error-text">Error: ${escapeHtml(res.error)}</span>`;
-        return;
-      }
-      let html = `Hecho: ${res.copied.length} copiados · ${res.replaced.length} cambiados de versión · ${res.removed.length} quitados.`;
-      if (res.asideDir) html += `<br>Lo quitado está en <strong>${escapeHtml(res.asideDir)}</strong> por si necesitas recuperar algo.`;
-      if (res.failed.length) {
-        html += `<br><span class="error-text">No se pudieron tocar: ${res.failed.map((f) => `${escapeHtml(f.fileName)} (${escapeHtml(f.error)})`).join(', ')}. ¿Está Minecraft abierto o el antivirus bloqueando la carpeta?</span>`;
-      }
-      html += '<br><button id="recompareBtn" class="btn btn-ghost" style="margin-top:8px;">Volver a comparar</button>';
-      out.innerHTML = html;
-      document.getElementById('recompareBtn').addEventListener('click', () => runClientCompare(server, r.folder));
-    } catch (error) {
-      out.innerHTML = `<span class="error-text">Error: ${escapeHtml(error.message)}</span>`;
-    } finally {
-      applyBtn.disabled = false;
-    }
-  });
-
-  // Pack para amigos: todo lo del servidor que hace falta en un cliente
-  // (lo que ya tienes igual + lo que te falta + la versión del servidor de lo distinto).
-  document.getElementById('clientPackZipBtn').addEventListener('click', async () => {
-    const serverSideFiles = [
-      ...r.same.filter((m) => !r.serverOnly.some((s) => s.fileName === m.fileName)),
-      ...r.missing.filter((m) => m.need !== 'optional'),
-      ...r.different.map((m) => m.server),
-    ];
-    if (serverSideFiles.length === 0) {
-      out.innerHTML = '<span class="error-text">No hay mods que empaquetar.</span>';
-      return;
-    }
-    out.textContent = IS_WEB ? 'Preparando el ZIP…' : 'Elige dónde guardar el ZIP…';
-    const startTime = Date.now();
-    window.api.onModsExportProgress((info) => renderProgressBar(out, info, startTime));
-    try {
-      const result = await window.api.exportModsZip(server.id, serverSideFiles);
-      if (result.canceled) { out.textContent = ''; return; }
-      if (!result.ok) { out.innerHTML = `<span class="error-text">Error: ${escapeHtml(result.error)}</span>`; return; }
-      out.innerHTML = `ZIP creado con ${result.count} mods (${(result.size / 1024 / 1024).toFixed(1)} MB). Tus amigos lo descomprimen dentro de su carpeta <code>mods</code> (vacía, o con solo sus mods de gráficos/interfaz).`;
-    } catch (error) {
-      out.innerHTML = `<span class="error-text">Error: ${escapeHtml(error.message)}</span>`;
-    } finally {
-      window.api.removeModsExportProgressListeners();
-    }
-  });
 }
 
 function renderModsTable(server) {
@@ -2607,15 +2946,24 @@ function renderPlayers(players) {
 
 const CONSOLE_MAX_CHARS = 250000; // ~250 KB de log en pantalla; evita que la ventana crezca sin límite en sesiones largas
 
+const consoleHistory = { items: [], index: -1, draft: '' };
+
+function consoleAtBottom() {
+  const log = document.getElementById('consoleLog');
+  return log.scrollHeight - log.scrollTop - log.clientHeight < 40;
+}
+
 function appendConsole(text) {
   const log = document.getElementById('consoleLog');
+  const stick = consoleAtBottom();
   log.textContent += text;
   if (log.textContent.length > CONSOLE_MAX_CHARS) {
     const excess = log.textContent.length - CONSOLE_MAX_CHARS;
     const cutAt = log.textContent.indexOf('\n', excess);
     log.textContent = log.textContent.slice(cutAt === -1 ? excess : cutAt + 1);
   }
-  log.scrollTop = log.scrollHeight;
+  if (stick) log.scrollTop = log.scrollHeight;
+  else document.getElementById('consoleJump').hidden = false;
   if (state.currentTab === 'home') updateHomeConsole();
 }
 
@@ -2623,8 +2971,16 @@ async function sendConsoleCommand() {
   const input = document.getElementById('consoleInput');
   const command = input.value.trim();
   if (!command) return;
+  if (consoleHistory.items[consoleHistory.items.length - 1] !== command) consoleHistory.items.push(command);
+  if (consoleHistory.items.length > 100) consoleHistory.items.shift();
+  consoleHistory.index = -1;
+  consoleHistory.draft = '';
+  // Al enviar un comando se vuelve al final para ver la respuesta
+  const log = document.getElementById('consoleLog');
+  log.scrollTop = log.scrollHeight;
   appendConsole(`\n> ${command}\n`);
   input.value = '';
+  input.focus();
   try {
     await window.api.sendCommand(state.selectedId, command);
   } catch (error) {

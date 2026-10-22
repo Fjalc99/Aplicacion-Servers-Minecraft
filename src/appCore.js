@@ -19,6 +19,7 @@ const clientSync = require('./clientSync');
 const loaderUpdater = require('./loaderUpdater');
 const localWorld = require('./localWorld');
 const modUpdater = require('./modUpdater');
+const serverMods = require('./serverMods');
 
 /** Primera IPv4 de la red local (la que usan los que están en tu misma WiFi). */
 function lanIpv4() {
@@ -600,6 +601,45 @@ function createAppCore({ send, notify, minuteMs = 60 * 1000 }) {
       }
     },
 
+    // ---------- Lista de mods del servidor ----------
+    'mods:listServer': async (serverId) => {
+      try {
+        const server = requireServer(serverId);
+        return { ok: true, ...(await serverMods.listServerMods(server)), curseforge: curseforge.publicInfo().configured };
+      } catch (err) {
+        return { ok: false, error: err.message };
+      }
+    },
+
+    'mods:setEnabled': ({ serverId, fileNames, enabled }) => {
+      try {
+        const server = requireServer(serverId);
+        if (javaProcess.isRunning(serverId)) throw new Error('Detén el servidor antes de activar o desactivar mods.');
+        const changed = [];
+        const failed = [];
+        for (const fileName of fileNames || []) {
+          try {
+            changed.push({ fileName, newFileName: serverMods.setModEnabled(server, fileName, Boolean(enabled)) });
+          } catch (err) {
+            failed.push({ fileName, error: err.message });
+          }
+        }
+        return { ok: true, changed, failed };
+      } catch (err) {
+        return { ok: false, error: err.message };
+      }
+    },
+
+    'mods:removeServer': ({ serverId, fileNames }) => {
+      try {
+        const server = requireServer(serverId);
+        if (javaProcess.isRunning(serverId)) throw new Error('Detén el servidor antes de quitar mods.');
+        return { ok: true, ...serverMods.removeServerMods(server, fileNames) };
+      } catch (err) {
+        return { ok: false, error: err.message };
+      }
+    },
+
     // ---------- Actualizar mods del servidor (Modrinth + CurseForge) ----------
     'mods:checkUpdates': async ({ serverId, includeBeta }) => {
       try {
@@ -698,12 +738,16 @@ function createAppCore({ send, notify, minuteMs = 60 * 1000 }) {
       }
     },
 
-    'mods:applyClientSync': ({ folder, serverId, remove, copy, replace }) => {
+    'mods:applyClientSync': ({ folder, serverId, remove, copy, replace, toServer, removeServer }) => {
       try {
         const server = requireServer(serverId);
         const modsDir = path.join(server.dir, 'mods');
         if (modAnalyzer.samePath(folder, modsDir)) throw new Error('Esa es la carpeta del servidor, no la del cliente.');
-        return { ok: true, ...clientSync.applyClientSync(folder, modsDir, { remove, copy, replace }) };
+        const touchesServer = (toServer && toServer.length) || (removeServer && removeServer.length);
+        if (touchesServer && javaProcess.isRunning(serverId)) {
+          throw new Error('Para cambiar mods del servidor, detenlo antes.');
+        }
+        return { ok: true, ...clientSync.applyClientSync(folder, modsDir, { remove, copy, replace, toServer, removeServer }) };
       } catch (err) {
         return { ok: false, error: err.message };
       }

@@ -98,3 +98,27 @@ test('aplicar rechaza nombres con rutas', async () => {
   assert.equal(result.failed.length, 3);
   assert.equal(result.asideDir, null);
 });
+
+test('filas alineadas para la pantalla de pasar mods', async () => {
+  const { client, server, opts } = await setup();
+  const r = await compareClientWithServer(client, server, opts);
+  const kinds = Object.fromEntries(r.rows.map((row) => [row.name, row.kind]));
+  assert.deepEqual(kinds, {
+    create: 'same', jei: 'different', spark: 'serverOnlyInClient', sodium: 'fineClient', cosa: 'extra',
+    ftblib: 'missing', ferritecore: 'missingOptional', addonraro: 'missing',
+  });
+  const jei = r.rows.find((row) => row.name === 'jei');
+  assert.equal(jei.client.fileName, 'jei-19.1.jar');
+  assert.equal(jei.server.fileName, 'jei-19.2.jar');
+  assert.equal(r.rows.find((row) => row.name === 'addonraro').needUnknown, true);
+});
+
+test('aplicar también hacia el servidor: copiar desde tu Minecraft y quitar del servidor', async () => {
+  const { client, server } = await setup();
+  const result = applyClientSync(client, server, { toServer: ['cosa-extra.jar', 'jei-19.1.jar'], removeServer: ['spark.jar'] });
+  assert.deepEqual(result.failed, []);
+  assert.ok(fs.existsSync(path.join(server, 'cosa-extra.jar')));
+  assert.equal(fs.existsSync(path.join(server, 'spark.jar')), false);
+  assert.ok(fs.existsSync(path.join(result.serverAsideDir, 'spark.jar')), 'lo quitado del servidor se aparta');
+  assert.ok(fs.existsSync(path.join(client, 'cosa-extra.jar')), 'tu Minecraft no se toca');
+});

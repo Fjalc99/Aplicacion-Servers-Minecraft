@@ -401,10 +401,22 @@ input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--accent);
 
 /* ---------- Console ---------- */
 
-#tab-console { display: flex; flex-direction: column; gap: 10px; height: 100%; }
+/* La consola ocupa el alto disponible y hace scroll POR DENTRO: la caja de
+   comandos queda siempre visible abajo, sin tener que bajar la página. */
+#tab-console { display: flex; flex-direction: column; gap: 10px; height: 100%; min-height: 0; }
+#tab-console.active, #tab-console:not([hidden]) { overflow: hidden; }
+
+.console-log-wrap { position: relative; flex: 1; min-height: 0; display: flex; }
+.console-jump {
+  position: absolute; right: 14px; bottom: 12px;
+  border: 1px solid var(--accent); background: var(--surface-2); color: var(--accent-strong);
+  border-radius: 999px; padding: 6px 12px; font: inherit; font-size: 12px; cursor: pointer;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, .35);
+}
 
 .console-log {
   flex: 1;
+  min-height: 0;
   background: #0e1014;
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -414,14 +426,13 @@ input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--accent);
   line-height: 1.55;
   white-space: pre-wrap;
   overflow-y: auto;
-  min-height: 320px;
 }
 
-.console-input-row { display: flex; gap: 8px; }
+.console-input-row { display: flex; gap: 8px; flex: 0 0 auto; }
 .console-input-row input { flex: 1; font-family: var(--mono); }
 
-.console-layout { display: grid; grid-template-columns: 1fr 220px; gap: 16px; height: 100%; }
-.console-main { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.console-layout { display: grid; grid-template-columns: 1fr 220px; grid-template-rows: minmax(0, 1fr); gap: 16px; height: 100%; min-height: 0; }
+.console-main { display: flex; flex-direction: column; gap: 10px; min-width: 0; min-height: 0; }
 
 .console-players {
   background: var(--surface);
@@ -474,7 +485,9 @@ input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--accent);
 .plist-row .btn { padding: 2px 7px; font-size: 10.5px; }
 
 @media (max-width: 760px) {
-  .console-layout { grid-template-columns: 1fr; }
+  .console-layout { grid-template-columns: 1fr; grid-template-rows: auto auto; height: auto; }
+  .console-log-wrap { flex: none; height: 60vh; }
+  #tab-console:not([hidden]) { overflow: visible; }
 }
 
 /* ---------- Wizard overlay ---------- */
@@ -859,4 +872,103 @@ input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--accent);
   display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 10px 0;
   padding: 10px 14px; border-radius: 10px; border: 1px solid var(--accent-strong, #f2ab5c);
   background: var(--accent-soft, rgba(242,171,92,.12)); font-size: 13px;
+}
+
+/* ===================== Pestaña Mods: mods del servidor ===================== */
+.visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.mods-head { display: flex; align-items: center; justify-content: space-between; gap: 14px; flex-wrap: wrap; margin-bottom: 14px; }
+.mods-title { margin: 0; font-size: 17px; font-weight: 600; }
+.mods-head-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.mods-filters { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
+.mods-search { flex: 1 1 260px; display: flex; align-items: center; height: 38px; padding: 0 12px; border-radius: var(--radius); border: 1px solid var(--border); background: var(--surface); }
+.mods-search input { flex: 1; min-width: 0; background: transparent; border: 0; outline: none; color: var(--text); font: inherit; padding: 0; }
+.mods-chips { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.mods-chip { height: 34px; padding: 0 12px; border-radius: 999px; font: inherit; font-size: 13px; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; background: transparent; border: 1px solid var(--border); color: #c9cdd6; }
+.mods-chip.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent-strong); }
+.mods-chip-count { font-size: 11px; padding: 1px 6px; border-radius: 999px; background: var(--surface-3); color: #c9cdd6; }
+.mods-chip.on .mods-chip-count { background: var(--accent); color: var(--bg); }
+#modsStatus { min-height: 18px; margin-bottom: 10px; }
+
+.mods-layout { display: flex; gap: 16px; flex-wrap: wrap; align-items: flex-start; }
+.mods-list-card { flex: 999 1 560px; min-width: 0; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); overflow: hidden; }
+.mods-list-scroll { overflow-x: auto; }
+.mods-rows { min-width: 720px; }
+.mods-row { display: grid; grid-template-columns: 44px minmax(0, 2.4fr) minmax(0, 1fr) minmax(0, 1.1fr) minmax(0, 1.3fr) 64px; align-items: center; padding: 9px 12px; border-bottom: 1px solid #262a33; }
+.mods-row-head { color: var(--text-muted); font-size: 12px; padding: 10px 12px; border-bottom-color: var(--border); }
+.mods-row.selected { background: rgba(232, 150, 63, 0.07); }
+.mods-row.open { background: var(--surface-2); box-shadow: inset 3px 0 0 var(--accent); }
+.mods-row .center { display: flex; justify-content: center; }
+.mods-row .center input { width: 16px; height: 16px; accent-color: var(--accent); }
+.mods-row .right { display: flex; justify-content: flex-end; }
+.mods-row .mono, .sync-ver { font-family: var(--mono); font-size: 12px; color: #c9cdd6; }
+.mods-name-btn { display: flex; align-items: center; gap: 10px; min-width: 0; background: transparent; border: 0; padding: 0; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.mods-name-text { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.mods-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mods-name.off { color: var(--text-muted); text-decoration: line-through; }
+.mods-name-text .mod-file { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-muted); font-family: var(--mono); }
+.mod-icon { border-radius: 8px; display: inline-flex; align-items: center; justify-content: center; font-weight: 700; color: var(--bg); }
+.mod-icon.faded { opacity: 0.4; }
+.mods-side { font-size: 12px; color: #c9cdd6; }
+.mods-side.side-server { color: #8fb4f0; }
+.mods-side.side-client { color: #e9a59c; }
+.mods-side.side-unknown { color: var(--text-muted); }
+.mods-status { display: inline-block; font-size: 12px; padding: 3px 9px; border-radius: 999px; }
+.mods-status.big { font-size: 13px; padding: 5px 12px; }
+.mods-status.ok { background: var(--ok-soft); color: #8fc47a; }
+.mods-status.warn { background: var(--accent-soft); color: var(--accent-strong); }
+.mods-status.bad { background: var(--danger-soft); color: #e9a59c; }
+.mods-status.muted { background: var(--surface-2); color: #a3a8b5; }
+.mods-switch { width: 38px; height: 22px; border-radius: 999px; border: 0; padding: 3px; cursor: pointer; display: flex; justify-content: flex-start; background: var(--border-strong); }
+.mods-switch.on { justify-content: flex-end; background: var(--accent); }
+.mods-switch span { width: 16px; height: 16px; border-radius: 50%; background: var(--text); }
+.mods-foot { padding: 12px 16px; }
+
+.mods-detail { flex: 1 1 300px; min-width: 0; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); padding: 18px; display: flex; flex-direction: column; gap: 14px; box-sizing: border-box; position: sticky; top: 0; }
+.mods-detail-head { display: flex; gap: 12px; align-items: center; }
+.mods-detail-head h3 { margin: 0 0 2px; font-size: 16px; }
+.mods-detail-file { font-family: var(--mono); font-size: 12px; color: #c9cdd6; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; overflow-wrap: anywhere; }
+.mods-detail-dl { margin: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr); gap: 8px 12px; font-size: 13px; }
+.mods-detail-dl dt { color: var(--text-muted); }
+.mods-detail-dl dd { margin: 0; }
+.mods-detail-dl dd.warn { color: var(--accent-strong); font-weight: 600; }
+.mods-detail-dl dd.ok { color: #8fc47a; }
+.mods-note-box { margin: 0; font-size: 13px; line-height: 1.5; padding: 10px 12px; border-radius: 8px; }
+.mods-note-box.bad { background: var(--danger-soft); color: #e9a59c; }
+.mods-note-box.warn { background: var(--accent-soft); color: var(--accent-strong); }
+.mods-detail-actions { display: flex; flex-direction: column; gap: 8px; }
+.mods-detail-row { display: flex; gap: 8px; flex-wrap: wrap; }
+.mods-detail-row > * { flex: 1; justify-content: center; text-decoration: none; }
+.btn.danger-ghost { border-color: rgba(193, 85, 74, 0.5); color: #e08a80; }
+.mods-selection { position: sticky; bottom: 0; margin-top: 14px; display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding: 12px 16px; border-radius: 10px; background: var(--surface-3); border: 1px solid var(--border-strong); box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35); }
+
+/* ===================== Pestaña Mods: pasar mods entre carpetas ===================== */
+.sync-grid { display: grid; grid-template-columns: minmax(0, 1fr) 150px minmax(0, 1fr); gap: 12px; align-items: stretch; }
+.sync-side-card { border: 1px solid var(--border); border-radius: 10px; background: var(--surface); padding: 12px 16px; display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.sync-side-card .mod-file { font-family: var(--mono); color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sync-side-title { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.sync-side-title .hint { margin-left: auto; }
+.sync-side-title select { flex: 1 1 180px; min-width: 0; height: 30px; padding: 0 8px; font-size: 13px; }
+.sync-arrows { display: flex; align-items: center; justify-content: center; color: var(--text-muted); font-size: 22px; }
+.sync-rows { display: flex; flex-direction: column; gap: 8px; margin: 14px 0 16px; }
+.sync-cell { min-height: 60px; box-sizing: border-box; border-radius: 10px; padding: 9px 14px; display: flex; flex-direction: column; justify-content: center; gap: 3px; min-width: 0; background: var(--surface); border: 1px solid var(--border); }
+.sync-cell.empty { background: transparent; border: 1px dashed var(--border-strong); }
+.sync-cell.accent { border-color: #4a5a7a; }
+.sync-cell.danger { border-color: rgba(193, 85, 74, 0.45); }
+.sync-cell .mod-file { font-family: var(--mono); color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sync-cell-top { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.sync-cell-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sync-ver { padding: 1px 7px; border-radius: 5px; background: var(--surface-2); flex: 0 0 auto; }
+.sync-mid { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; text-align: center; }
+.sync-buttons { display: flex; gap: 6px; }
+.sync-btn { width: 36px; height: 32px; border-radius: 7px; border: 1px solid var(--border-strong); background: var(--surface); color: #8fb4f0; cursor: pointer; display: flex; align-items: center; justify-content: center; }
+.sync-btn.toClient { border: 0; background: var(--accent); color: var(--bg); }
+.sync-btn.removeClient, .sync-btn.removeServer { border-color: rgba(193, 85, 74, 0.5); background: transparent; color: #e08a80; }
+.sync-show-same { align-self: center; margin-top: 4px; height: 36px; padding: 0 16px; border-radius: 999px; border: 1px dashed var(--border-strong); background: transparent; color: var(--text-muted); font: inherit; cursor: pointer; }
+.sync-pending { position: sticky; bottom: 0; padding: 12px 16px; background: var(--surface); border: 1px solid var(--border-strong); border-radius: 10px; display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; box-shadow: 0 -6px 20px rgba(0, 0, 0, 0.25); }
+.sync-pending-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+.sync-pending-text .hint { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 760px) {
+  .sync-grid { grid-template-columns: minmax(0, 1fr); }
+  .sync-arrows { display: none; }
+  .mods-detail { position: static; }
 }

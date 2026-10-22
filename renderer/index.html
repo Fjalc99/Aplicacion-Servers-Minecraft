@@ -84,9 +84,12 @@
         <section id="tab-console" class="tab-panel">
           <div class="console-layout">
             <div class="console-main">
-              <div class="console-log" id="consoleLog"></div>
+              <div class="console-log-wrap">
+                <div class="console-log" id="consoleLog" role="log" aria-live="off"></div>
+                <button type="button" id="consoleJump" class="console-jump" hidden>↓ Ir al final</button>
+              </div>
               <div class="console-input-row">
-                <input id="consoleInput" type="text" placeholder="Escribe un comando y pulsa Enter…" disabled />
+                <input id="consoleInput" type="text" placeholder="Escribe un comando y pulsa Enter (↑/↓: comandos anteriores)…" autocomplete="off" spellcheck="false" aria-label="Comando para la consola" disabled />
                 <button id="consoleSend" type="button" class="btn btn-accent" disabled>
                   <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M4 20L20 12L4 4L4 10L14 12L4 14L4 20Z" fill="currentColor"/></svg>
                   Enviar

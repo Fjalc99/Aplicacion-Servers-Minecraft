@@ -106,7 +106,55 @@ async function compareClientWithServer(clientDir, serverModsDir, opts = {}) {
   for (const list of Object.values(out)) list.sort(byName);
 
   const warnings = [...new Set([...client.warnings, ...server.warnings])];
-  return { ...out, warnings };
+  return { ...out, rows: alignedRows(client.results, server.results, serverIndex, clientIndex), warnings, serverModsDir, clientDir };
+}
+
+const side = (r) => ({ fileName: r.fileName, version: r.version || null, file: r.file });
+
+/**
+ * Una fila por mod con lo que hay a cada lado, para la pantalla de "pasar mods":
+ * kind ∈ missing | missingOptional | different | extra | serverOnlyInClient |
+ *        clientInServer | fineClient | fineServer | same
+ */
+function alignedRows(clientResults, serverResults, serverIndex, clientIndex) {
+  const rows = [];
+  const usedServer = new Set();
+  for (const c of clientResults) {
+    const s = findMatch(c, serverIndex);
+    if (s) usedServer.add(s.fileName);
+    let kind;
+    if (c.clientSide === 'unsupported') kind = 'serverOnlyInClient';
+    else if (s && s.status === 'client-only') kind = 'clientInServer';
+    else if (s) kind = s.sha1 === c.sha1 ? 'same' : 'different';
+    else kind = c.status === 'client-only' ? 'fineClient' : 'extra';
+    rows.push({
+      key: `c:${c.fileName}`,
+      name: c.name,
+      kind,
+      server: s ? side(s) : null,
+      client: side(c),
+      links: { modrinth: c.modrinthUrl || (s && s.modrinthUrl) || null, curseforge: c.curseforgeUrl || (s && s.curseforgeUrl) || null },
+    });
+  }
+  for (const s of serverResults) {
+    if (usedServer.has(s.fileName) || findMatch(s, clientIndex)) continue;
+    const need = clientNeed(s);
+    let kind;
+    if (s.status === 'client-only') kind = 'clientInServer';
+    else if (need === 'server-only') kind = 'fineServer';
+    else if (need === 'optional') kind = 'missingOptional';
+    else kind = 'missing';
+    rows.push({
+      key: `s:${s.fileName}`,
+      name: s.name,
+      kind,
+      needUnknown: need === 'unknown',
+      server: side(s),
+      client: null,
+      links: { modrinth: s.modrinthUrl || null, curseforge: s.curseforgeUrl || null },
+    });
+  }
+  return rows;
 }
 
 /** Solo nombres de archivo .jar sueltos (sin rutas) que existan dentro de dir. */
@@ -134,7 +182,7 @@ function moveFile(from, to) {
  *   copy:    [nombre de archivo del servidor]         -> se copia al cliente
  *   replace: [{ client, server }]                     -> se aparta el del cliente y se copia el del servidor
  */
-function applyClientSync(clientDir, serverModsDir, { remove = [], copy = [], replace = [] } = {}) {
+function applyClientSync(clientDir, serverModsDir, { remove = [], copy = [], replace = [], toServer = [], removeServer = [] } = {}) {
   if (!fs.existsSync(clientDir)) throw new Error('No se encuentra la carpeta del cliente.');
   let asideDir = null;
   const aside = () => {
@@ -145,7 +193,15 @@ function applyClientSync(clientDir, serverModsDir, { remove = [], copy = [], rep
     return asideDir;
   };
 
-  const result = { removed: [], copied: [], replaced: [], failed: [], asideDir: null };
+  const result = { removed: [], copied: [], replaced: [], toServer: [], removedFromServer: [], failed: [], asideDir: null, serverAsideDir: null };
+  let serverAside = null;
+  const asideServer = () => {
+    if (!serverAside) {
+      serverAside = path.join(path.dirname(path.resolve(serverModsDir)), `mods-quitados-${timestamp()}`);
+      fs.mkdirSync(serverAside, { recursive: true });
+    }
+    return serverAside;
+  };
 
   const putAside = (fileName) => {
     const from = safeJar(clientDir, fileName);
@@ -187,7 +243,32 @@ function applyClientSync(clientDir, serverModsDir, { remove = [], copy = [], rep
     }
   }
 
+  // De tu Minecraft al servidor
+  for (const fileName of toServer) {
+    try {
+      const from = safeJar(clientDir, fileName);
+      const to = safeJar(serverModsDir, fileName);
+      if (!fs.existsSync(from)) throw new Error('ya no está en tu Minecraft');
+      if (fs.existsSync(to)) moveFile(to, path.join(asideServer(), fileName));
+      fs.copyFileSync(from, to);
+      if (!fs.existsSync(to)) throw new Error('desapareció justo después de copiarse (¿antivirus?)');
+      result.toServer.push(fileName);
+    } catch (err) {
+      result.failed.push({ fileName, error: err.message });
+    }
+  }
+  for (const fileName of removeServer) {
+    try {
+      const from = safeJar(serverModsDir, fileName);
+      if (fs.existsSync(from)) moveFile(from, path.join(asideServer(), fileName));
+      result.removedFromServer.push(fileName);
+    } catch (err) {
+      result.failed.push({ fileName, error: err.message });
+    }
+  }
+
   result.asideDir = asideDir;
+  result.serverAsideDir = serverAside;
   return result;
 }
 

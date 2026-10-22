@@ -57,10 +57,17 @@ function readJarMetadata(file) {
       const idMatch = block.match(/^\s*modId\s*=\s*["']([^"'\r\n]+)["']/m);
       const nameMatch = block.match(/^\s*displayName\s*=\s*["']([^"'\r\n]+)["']/m);
       const testMatch = text.match(/^\s*displayTest\s*=\s*["']([A-Z_]+)["']/m);
+      const versionMatch = block.match(/^\s*version\s*=\s*["']([^"'\r\n]+)["']/m);
       const name = nameMatch && !nameMatch[1].includes('${') ? nameMatch[1].trim() : null;
       // IGNORE_SERVER_VERSION = "este mod no necesita estar en el servidor" (mods de cliente).
       const side = testMatch && testMatch[1] === 'IGNORE_SERVER_VERSION' ? 'client-only' : null;
-      return { name, side, modId: idMatch ? idMatch[1].trim().toLowerCase() : null };
+      return {
+        name,
+        side,
+        modId: idMatch ? idMatch[1].trim().toLowerCase() : null,
+        version: versionMatch && !versionMatch[1].includes('${') ? versionMatch[1].trim() : null,
+        requires: requiredDependencies(text),
+      };
     }
     const fabric = readZipEntry(file, 'fabric.mod.json');
     if (fabric) {
@@ -69,12 +76,35 @@ function readJarMetadata(file) {
         name: json.name || null,
         side: json.environment === 'client' ? 'client-only' : null,
         modId: json.id ? String(json.id).toLowerCase() : null,
+        version: json.version && !String(json.version).includes('${') ? String(json.version) : null,
+        requires: Object.keys(json.depends || {}).map((id) => id.toLowerCase()).filter((id) => !BASE_IDS.has(id)),
       };
     }
   } catch (err) {
     /* jar dañado o ficha ilegible: no pasa nada, se queda sin identificar */
   }
   return null;
+}
+
+// Dependencias que no son mods (el propio juego y el loader).
+const BASE_IDS = new Set(['minecraft', 'neoforge', 'forge', 'java', 'fabricloader', 'fabric-api', 'fabric', 'quilt_loader']);
+
+/**
+ * modIds que un mods.toml declara como OBLIGATORIOS en sus bloques
+ * [[dependencies.x]] (type="required" en NeoForge, mandatory=true en Forge).
+ */
+function requiredDependencies(text) {
+  const out = new Set();
+  const blocks = text.split(/^\s*\[\[/m).slice(1);
+  for (const block of blocks) {
+    if (!/^\s*dependencies\./.test(block)) continue;
+    const id = block.match(/^\s*modId\s*=\s*["']([^"'\r\n]+)["']/m);
+    const type = block.match(/^\s*type\s*=\s*["']([^"'\r\n]+)["']/m);
+    const mandatory = block.match(/^\s*mandatory\s*=\s*(true|false)/m);
+    const required = type ? type[1].toLowerCase() === 'required' : mandatory ? mandatory[1] === 'true' : false;
+    if (id && required && !BASE_IDS.has(id[1].toLowerCase())) out.add(id[1].trim().toLowerCase());
+  }
+  return [...out];
 }
 
 /** Texto del primer bloque [[mods]] de un mods.toml (hasta la siguiente cabecera). */
@@ -130,13 +160,13 @@ async function modrinthLookup(hashes, fetchImpl) {
  *   status ∈ 'needed' | 'client-only' | 'unknown'
  *   source ∈ 'modrinth' | 'curseforge' | 'jar' | null (de dónde sale la decisión)
  */
-async function analyzeMods(folder, { fetchImpl = fetch, curseforgeKey = curseforge.getApiKey() } = {}) {
+async function analyzeMods(folder, { fetchImpl = fetch, curseforgeKey = curseforge.getApiKey(), includeDisabled = false } = {}) {
   if (!folder || !fs.existsSync(folder) || !fs.statSync(folder).isDirectory()) {
     throw new Error('No se encuentra esa carpeta.');
   }
   const files = fs
     .readdirSync(folder)
-    .filter((f) => f.toLowerCase().endsWith('.jar'))
+    .filter((f) => f.toLowerCase().endsWith('.jar') || (includeDisabled && f.toLowerCase().endsWith('.jar.disabled')))
     .sort((a, b) => a.localeCompare(b))
     .map((f) => path.join(folder, f));
   if (files.length === 0) return { results: [], warnings: [] };
@@ -192,6 +222,10 @@ async function analyzeMods(folder, { fetchImpl = fetch, curseforgeKey = cursefor
       curseforgeUrl: null,
       modId: meta ? meta.modId : null,
       projectId: null,
+      // Desactivado = renombrado a .jar.disabled (el servidor no lo carga)
+      disabled: fileName.toLowerCase().endsWith('.jar.disabled'),
+      version: meta ? meta.version : null,
+      requires: meta ? meta.requires || [] : [],
     };
 
     const version = modrinth.hashToVersion[sha1];
@@ -204,6 +238,7 @@ async function analyzeMods(folder, { fetchImpl = fetch, curseforgeKey = cursefor
         status: serverSide === 'unsupported' ? 'client-only' : 'needed',
         source: 'modrinth',
         projectId: version.project_id,
+        version: version.version_number || base.version,
         serverSide,
         clientSide: project ? project.client_side : null,
         modrinthUrl: project ? `https://modrinth.com/mod/${project.slug}` : null,
@@ -225,6 +260,7 @@ async function analyzeMods(folder, { fetchImpl = fetch, curseforgeKey = cursefor
         // "Server", es un mod solo de servidor.
         clientSide: cf.client ? 'required' : cf.server ? 'unsupported' : null,
         curseforgeUrl: cf.url,
+        version: base.version || cf.displayName || null,
       };
     }
 
