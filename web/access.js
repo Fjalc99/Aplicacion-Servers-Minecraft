@@ -79,6 +79,11 @@ const OWNER_CHANNELS = new Set([
   'servers:applyPerformancePreset',
   'servers:versionInfo',
   'servers:updateVersion',
+  'config:list',
+  'config:read',
+  'config:save',
+  'config:gameRules',
+  'config:setGameRules',
 ]);
 
 const LEVEL_NAME_PATTERN = /^[a-zA-Z0-9_\- ]{1,48}$/;

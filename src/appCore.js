@@ -20,6 +20,7 @@ const loaderUpdater = require('./loaderUpdater');
 const localWorld = require('./localWorld');
 const modUpdater = require('./modUpdater');
 const serverMods = require('./serverMods');
+const modConfig = require('./modConfig');
 
 /** Primera IPv4 de la red local (la que usan los que están en tu misma WiFi). */
 function lanIpv4() {
@@ -65,6 +66,8 @@ function createAppCore({ send, notify, minuteMs = 60 * 1000 }) {
   // ---------------------------------------------------------------------------
   // serverId -> { timer, at }: cuenta atrás en marcha para apagar un servidor vacío
   const idleStops = new Map();
+  // serverId -> { regla: valor } cambiadas con el servidor encendido (aún no están en level.dat)
+  const liveGameRules = new Map();
 
   function cancelIdleStop(serverId) {
     const pending = idleStops.get(serverId);
@@ -241,6 +244,8 @@ function createAppCore({ send, notify, minuteMs = 60 * 1000 }) {
       },
       onExit: async ({ code, crashed, recentLogText }) => {
         cancelIdleStop(server.id);
+        // Al apagarse, el juego ya ha guardado las reglas en level.dat.
+        liveGameRules.delete(server.id);
         stopAutoBackupInterval(server.id);
 
         const diagnosis = crashed ? crashDiagnostics.diagnose(recentLogText) : null;
@@ -748,6 +753,67 @@ function createAppCore({ send, notify, minuteMs = 60 * 1000 }) {
           throw new Error('Para cambiar mods del servidor, detenlo antes.');
         }
         return { ok: true, ...clientSync.applyClientSync(folder, modsDir, { remove, copy, replace, toServer, removeServer }) };
+      } catch (err) {
+        return { ok: false, error: err.message };
+      }
+    },
+
+    // ---------- Configuración de mods y reglas del mundo ----------
+    'config:list': (serverId) => {
+      try {
+        const server = requireServer(serverId);
+        return { ok: true, ...modConfig.listConfigs(server), running: javaProcess.isRunning(serverId) };
+      } catch (err) {
+        return { ok: false, error: err.message };
+      }
+    },
+
+    'config:read': ({ serverId, rel }) => {
+      try {
+        const server = requireServer(serverId);
+        return { ok: true, ...modConfig.readConfig(server, rel) };
+      } catch (err) {
+        return { ok: false, error: err.message };
+      }
+    },
+
+    'config:save': ({ serverId, rel, hash, changes, content }) => {
+      try {
+        const server = requireServer(serverId);
+        if (['restore', 'update'].includes(backupJobs.get(serverId))) throw new Error('Espera a que termine la restauración o la actualización en curso.');
+        const result = modConfig.saveConfig(server, { rel, hash, changes, content });
+        return { ok: true, ...result, running: javaProcess.isRunning(serverId) };
+      } catch (err) {
+        return { ok: false, error: err.message };
+      }
+    },
+
+    'config:gameRules': (serverId) => {
+      try {
+        const server = requireServer(serverId);
+        const running = javaProcess.isRunning(serverId);
+        const overrides = running ? liveGameRules.get(serverId) || {} : {};
+        return { ok: true, ...modConfig.listGameRules(server, overrides), running };
+      } catch (err) {
+        return { ok: false, error: err.message };
+      }
+    },
+
+    'config:setGameRules': ({ serverId, changes }) => {
+      try {
+        const server = requireServer(serverId);
+        const running = javaProcess.isRunning(serverId);
+        const overrides = running ? liveGameRules.get(serverId) || {} : {};
+        const values = modConfig.validateGameRuleChanges(server, changes, overrides);
+        if (Object.keys(values).length === 0) throw new Error('No hay cambios que guardar.');
+        if (running) {
+          for (const [k, v] of Object.entries(values)) javaProcess.sendCommand(serverId, `gamerule ${k} ${v}`);
+          liveGameRules.set(serverId, { ...overrides, ...values });
+          return { ok: true, live: true };
+        }
+        if (['restore', 'update'].includes(backupJobs.get(serverId))) throw new Error('Espera a que termine la restauración o la actualización en curso.');
+        const result = modConfig.writeGameRulesToLevel(server, values);
+        return { ok: true, live: false, ...result };
       } catch (err) {
         return { ok: false, error: err.message };
       }

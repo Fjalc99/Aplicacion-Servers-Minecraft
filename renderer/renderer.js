@@ -1821,11 +1821,14 @@ function renderMods(server) {
     Object.assign(modsUi, { serverId: server.id, view: 'list', filter: 'all', search: '', selected: new Set(), open: null, data: null });
   }
   if (server.loader === 'vanilla') {
-    el.innerHTML = '<p class="hint">Este servidor es Vanilla: no admite mods. Puedes usarlo con datapacks manualmente.</p>';
+    if (modsUi.view === 'config') return renderConfigView(server);
+    el.innerHTML = '<p class="hint">Este servidor es Vanilla: no admite mods. Puedes usarlo con datapacks manualmente.</p><button type="button" class="btn btn-ghost" id="modsRulesVanilla" style="margin-top:12px;">Cambiar las reglas del mundo</button>';
+    document.getElementById('modsRulesVanilla').addEventListener('click', () => { modsUi.view = 'config'; renderMods(server); });
     return;
   }
   if (modsUi.view === 'sync') return renderSyncView(server);
   if (modsUi.view === 'add') return renderAddModsView(server);
+  if (modsUi.view === 'config') return renderConfigView(server);
   return renderServerModsView(server);
 }
 
@@ -1844,6 +1847,7 @@ async function renderServerModsView(server) {
       <div class="mods-head-actions">
         <button type="button" id="modsCheckUpdates" class="btn btn-ghost">Buscar actualizaciones</button>
         <button type="button" id="modsAdd" class="btn btn-ghost">Añadir mods</button>
+        <button type="button" id="modsConfig" class="btn btn-ghost">Configurar mods</button>
         <button type="button" id="modsSync" class="btn btn-accent">Pasar mods con mi Minecraft</button>
       </div>
     </div>
@@ -1864,6 +1868,7 @@ async function renderServerModsView(server) {
     <div id="modsSelectionBar"></div>
   `;
   document.getElementById('modsAdd').addEventListener('click', () => { modsUi.view = 'add'; renderMods(server); });
+  document.getElementById('modsConfig').addEventListener('click', () => { modsUi.view = 'config'; renderMods(server); });
   document.getElementById('modsSync').addEventListener('click', () => { modsUi.view = 'sync'; renderMods(server); });
   document.getElementById('modsCheckUpdates').addEventListener('click', () => checkServerModUpdates(server, { force: true }));
   document.getElementById('modsSearch').addEventListener('input', (e) => {
@@ -3840,3 +3845,571 @@ function drawLineChart(canvas, values, maxValue, { color, formatY, limitLine = n
 }
 
 init();
+
+// ---------------------------------------------------------------------------
+// Pantalla 3: configurar mods y reglas del mundo
+// ---------------------------------------------------------------------------
+
+const RULES_ID = '__rules__';
+const cfgUi = {
+  serverId: null,
+  groups: null,
+  worldExists: true,
+  running: false,
+  selected: RULES_ID,
+  navSearch: '',
+  showClient: false,
+  fileRel: null,
+  file: null, // resultado de readConfig
+  rules: null, // resultado de getGameRules
+  edits: {}, // id -> valor nuevo (solo del archivo o de las reglas abiertas)
+  search: '',
+  textMode: false,
+  textDraft: null,
+  message: null, // { kind: 'ok' | 'error' | 'info', text }
+  busy: false,
+};
+
+function humanizeKey(key) {
+  const last = String(key).split('.').pop();
+  const words = last.replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/[_-]+/g, ' ').trim().toLowerCase();
+  return words.charAt(0).toUpperCase() + words.slice(1);
+}
+
+function cfgSame(a, b) {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+function cfgHasPending() {
+  return Object.keys(cfgUi.edits).length > 0 || (cfgUi.textMode && cfgUi.file && cfgUi.textDraft !== null && cfgUi.textDraft !== cfgUi.file.content);
+}
+
+function cfgConfirmLeave() {
+  return !cfgHasPending() || confirm('Tienes cambios sin guardar. ¿Descartarlos?');
+}
+
+/** Opciones abiertas ahora mismo, en un formato común (archivo .toml o reglas del mundo). */
+function cfgOptions() {
+  if (cfgUi.selected === RULES_ID) {
+    if (!cfgUi.rules) return [];
+    const groups = [];
+    for (const r of cfgUi.rules.rules) {
+      let g = groups.find((x) => x.title === r.group);
+      if (!g) groups.push((g = { title: r.group, options: [] }));
+      g.options.push({
+        id: r.key,
+        key: r.key,
+        label: r.label === r.key ? humanizeKey(r.key) : r.label,
+        help: r.help,
+        type: r.type,
+        value: r.value,
+        default: r.default,
+        range: r.min !== undefined || r.max !== undefined ? { min: r.min, max: r.max } : null,
+        unit: r.unit || '',
+        showKey: true,
+      });
+    }
+    return groups;
+  }
+  if (!cfgUi.file || cfgUi.file.kind !== 'toml') return [];
+  return cfgUi.file.sections.map((s) => ({
+    title: s.title || 'General',
+    help: s.help,
+    readOnly: s.readOnly,
+    options: s.options.map((o) => ({ ...o, label: humanizeKey(o.key), showKey: true, unit: '' })),
+  }));
+}
+
+function cfgCurrent(o) {
+  return Object.prototype.hasOwnProperty.call(cfgUi.edits, o.id) ? cfgUi.edits[o.id] : o.value;
+}
+
+function cfgFormat(o, v) {
+  if (v === null || v === undefined) return '—';
+  if (o.type === 'bool') return v ? 'Sí' : 'No';
+  if (o.type === 'list') return v.length ? v.join(', ') : '(vacía)';
+  if (o.type === 'string') return v === '' ? '(vacío)' : `"${v}"`;
+  return `${v}${o.unit || ''}`;
+}
+
+async function renderConfigView(server) {
+  const el = document.getElementById('tab-mods');
+  if (cfgUi.serverId !== server.id) {
+    Object.assign(cfgUi, { serverId: server.id, groups: null, selected: RULES_ID, fileRel: null, file: null, rules: null, edits: {}, search: '', navSearch: '', textMode: false, textDraft: null, message: null });
+  }
+  el.innerHTML = `
+    <div class="mods-head">
+      <div style="display:flex; align-items:center; gap:12px;">
+        <button type="button" class="btn btn-ghost" id="cfgBack" aria-label="Volver a los mods del servidor">←</button>
+        <div>
+          <h2 class="mods-title">Configurar mods</h2>
+          <div class="hint">Las opciones de cada mod y las reglas del mundo, como un formulario. No se toca ningún archivo hasta que pulses Guardar.</div>
+        </div>
+      </div>
+      <div class="mods-head-actions">
+        <button type="button" class="btn btn-ghost" id="cfgReload">Volver a leer</button>
+      </div>
+    </div>
+    <div class="cfg-layout">
+      <nav class="cfg-nav" aria-label="Mods con configuración">
+        <label class="mods-search cfg-nav-search">
+          <span class="visually-hidden">Buscar mod</span>
+          <input type="search" id="cfgNavSearch" placeholder="Buscar mod…" value="${escapeHtml(cfgUi.navSearch)}" />
+        </label>
+        <div id="cfgNavList" class="cfg-nav-list"><p class="hint" style="padding:8px;">Buscando configuraciones…</p></div>
+        <label class="field-inline cfg-nav-client"><input type="checkbox" id="cfgShowClient" ${cfgUi.showClient ? 'checked' : ''} /> Ver también las de solo cliente</label>
+      </nav>
+      <main class="cfg-main" id="cfgMain" aria-live="polite"></main>
+      <aside class="cfg-pending" id="cfgPending" aria-label="Cambios sin guardar"></aside>
+    </div>
+  `;
+  document.getElementById('cfgBack').addEventListener('click', () => {
+    if (!cfgConfirmLeave()) return;
+    cfgUi.edits = {};
+    cfgUi.textDraft = null;
+    modsUi.view = 'list';
+    renderMods(server);
+  });
+  document.getElementById('cfgReload').addEventListener('click', () => {
+    if (!cfgConfirmLeave()) return;
+    cfgUi.edits = {};
+    cfgUi.textDraft = null;
+    cfgUi.message = null;
+    cfgLoadList(server);
+    cfgOpen(server, cfgUi.selected, cfgUi.fileRel);
+  });
+  document.getElementById('cfgNavSearch').addEventListener('input', (e) => {
+    cfgUi.navSearch = e.target.value;
+    cfgRenderNav(server);
+  });
+  document.getElementById('cfgShowClient').addEventListener('change', (e) => {
+    cfgUi.showClient = e.target.checked;
+    cfgRenderNav(server);
+  });
+  bindConfigMain(server);
+  cfgRenderMain(server);
+  cfgRenderPending(server);
+  await cfgLoadList(server);
+  if (!cfgUi.rules && cfgUi.selected === RULES_ID) cfgOpen(server, RULES_ID);
+}
+
+async function cfgLoadList(server) {
+  let res;
+  try {
+    res = await window.api.listConfigs(server.id);
+  } catch (error) {
+    res = { ok: false, error: error.message };
+  }
+  if (state.selectedId !== server.id || modsUi.view !== 'config') return;
+  if (!res.ok) {
+    document.getElementById('cfgNavList').innerHTML = `<p class="error-text" style="padding:8px;">${escapeHtml(res.error)}</p>`;
+    return;
+  }
+  cfgUi.groups = res.groups;
+  cfgUi.worldExists = res.worldExists;
+  cfgUi.running = res.running;
+  cfgRenderNav(server);
+}
+
+function cfgRenderNav(server) {
+  const box = document.getElementById('cfgNavList');
+  if (!box) return;
+  const q = cfgUi.navSearch.trim().toLowerCase();
+  const groups = (cfgUi.groups || []).filter((g) => (cfgUi.showClient || g.serverRelevant) && (!q || g.name.toLowerCase().includes(q) || g.id.includes(q)));
+  const item = (id, name, sub, iconName) => `
+    <button type="button" class="cfg-nav-item${cfgUi.selected === id ? ' on' : ''}" data-cfg-pick="${escapeHtml(id)}" ${cfgUi.selected === id ? 'aria-current="page"' : ''}>
+      ${modIcon(iconName, 28)}
+      <span class="cfg-nav-text"><span class="cfg-nav-name">${escapeHtml(name)}</span><span class="cfg-nav-sub">${escapeHtml(sub)}</span></span>
+    </button>`;
+  const showRules = !q || 'minecraft reglas del mundo gamerule'.includes(q);
+  box.innerHTML = `
+    ${showRules ? `<div class="cfg-nav-label">Del juego</div>${item(RULES_ID, 'Minecraft (reglas del mundo)', 'Sin mods · /gamerule', 'Minecraft')}` : ''}
+    <div class="cfg-nav-label">Mods${cfgUi.groups ? ` (${groups.length})` : ''}</div>
+    ${cfgUi.groups === null ? '<p class="hint" style="padding:8px;">Buscando configuraciones…</p>' : groups.length ? groups.map((g) => item(g.id, g.name, `${g.files.length} archivo${g.files.length === 1 ? '' : 's'}${g.installed ? '' : ' · sin mod instalado'}`, g.name)).join('') : '<p class="hint" style="padding:8px;">No hay configuraciones que coincidan.</p>'}
+  `;
+  box.querySelectorAll('[data-cfg-pick]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const id = btn.dataset.cfgPick;
+      if (id === cfgUi.selected) return;
+      if (!cfgConfirmLeave()) return;
+      cfgOpen(server, id);
+    });
+  });
+}
+
+async function cfgOpen(server, groupId, rel) {
+  cfgUi.selected = groupId;
+  cfgUi.edits = {};
+  cfgUi.search = '';
+  cfgUi.textMode = false;
+  cfgUi.textDraft = null;
+  cfgUi.message = null;
+  cfgRenderNav(server);
+  if (groupId === RULES_ID) {
+    cfgUi.fileRel = null;
+    cfgUi.file = null;
+    cfgUi.rules = null;
+    cfgRenderMain(server);
+    cfgRenderPending(server);
+    let res;
+    try {
+      res = await window.api.getGameRules(server.id);
+    } catch (error) {
+      res = { ok: false, error: error.message };
+    }
+    if (state.selectedId !== server.id || cfgUi.selected !== RULES_ID) return;
+    if (!res.ok) cfgUi.message = { kind: 'error', text: res.error };
+    else {
+      cfgUi.rules = res;
+      cfgUi.running = res.running;
+    }
+    cfgRenderMain(server);
+    cfgRenderPending(server);
+    return;
+  }
+  const group = (cfgUi.groups || []).find((g) => g.id === groupId);
+  if (!group) return;
+  const file = group.files.find((f) => f.rel === rel) || group.files[0];
+  cfgUi.fileRel = file.rel;
+  cfgUi.file = null;
+  cfgRenderMain(server);
+  cfgRenderPending(server);
+  let res;
+  try {
+    res = await window.api.readConfig(server.id, file.rel);
+  } catch (error) {
+    res = { ok: false, error: error.message };
+  }
+  if (state.selectedId !== server.id || cfgUi.fileRel !== file.rel) return;
+  if (!res.ok) cfgUi.message = { kind: 'error', text: res.error };
+  else {
+    cfgUi.file = res;
+    if (res.kind !== 'toml') cfgUi.textMode = true;
+    if (res.warning) cfgUi.message = { kind: 'info', text: res.warning };
+  }
+  cfgRenderMain(server);
+  cfgRenderPending(server);
+}
+
+function cfgControl(o, v) {
+  const id = escapeHtml(o.id);
+  const label = escapeHtml(o.label);
+  if (o.readOnly) return `<span class="cfg-readonly">${escapeHtml(o.type === 'raw' ? String(v) : cfgFormat(o, v))}</span>`;
+  switch (o.type) {
+    case 'bool':
+      return `<button type="button" role="switch" class="cfg-switch${v ? ' on' : ''}" aria-checked="${v ? 'true' : 'false'}" aria-label="${label}" data-act="toggle" data-opt="${id}"><span></span></button>`;
+    case 'int':
+    case 'float': {
+      const r = o.range || {};
+      const hasSlider = r.min !== undefined && r.max !== undefined && Number.isFinite(r.min) && Number.isFinite(r.max) && r.max > r.min && (o.type === 'float' || r.max - r.min <= 1000);
+      const step = o.type === 'int' ? 1 : (r.max - r.min) / 100 || 'any';
+      return `${hasSlider ? `<input type="range" min="${r.min}" max="${r.max}" step="${step}" value="${escapeHtml(String(v))}" aria-label="${label}" data-act="num" data-opt="${id}" class="cfg-range" />` : ''}
+        <input type="number" value="${escapeHtml(String(v))}" ${r.min !== undefined ? `min="${r.min}"` : ''} ${r.max !== undefined ? `max="${r.max}"` : ''} step="${o.type === 'int' ? 1 : 'any'}" aria-label="${label}" data-act="num" data-opt="${id}" class="cfg-number" />${o.unit ? `<span class="hint cfg-unit">${escapeHtml(o.unit.trim())}</span>` : ''}`;
+    }
+    case 'enum':
+      if (o.choices.length <= 4) {
+        return `<div class="cfg-seg" role="radiogroup" aria-label="${label}">${o.choices.map((c) => `<button type="button" role="radio" aria-checked="${c === v ? 'true' : 'false'}" class="${c === v ? 'on' : ''}" data-act="choice" data-opt="${id}" data-value="${escapeHtml(c)}">${escapeHtml(c)}</button>`).join('')}</div>`;
+      }
+      return `<select aria-label="${label}" data-act="select" data-opt="${id}">${o.choices.map((c) => `<option value="${escapeHtml(c)}" ${c === v ? 'selected' : ''}>${escapeHtml(c)}</option>`).join('')}</select>`;
+    case 'string':
+      return `<input type="text" class="cfg-text" value="${escapeHtml(v)}" aria-label="${label}" data-act="text" data-opt="${id}" />`;
+    case 'list':
+      return `<textarea class="cfg-list" rows="${Math.min(8, Math.max(2, v.length + 1))}" aria-label="${label} (uno por línea)" data-act="list" data-opt="${id}">${escapeHtml(v.join('\n'))}</textarea>`;
+    case 'raw':
+      return `<input type="text" class="cfg-text cfg-mono" value="${escapeHtml(String(v))}" aria-label="${label}" data-act="raw" data-opt="${id}" />`;
+    default:
+      return `<span class="cfg-readonly">${escapeHtml(String(v))}</span>`;
+  }
+}
+
+function cfgRow(o) {
+  const v = cfgCurrent(o);
+  const changed = Object.prototype.hasOwnProperty.call(cfgUi.edits, o.id);
+  const hasDefault = o.default !== null && o.default !== undefined;
+  const notDefault = hasDefault && !cfgSame(v, o.default);
+  return `
+    <div class="cfg-row${changed ? ' changed' : ''}" data-row="${escapeHtml(o.id)}">
+      <div class="cfg-row-info">
+        <div class="cfg-row-title">
+          <span class="cfg-row-label">${escapeHtml(o.label)}</span>
+          ${changed ? '<span class="cfg-badge">sin guardar</span>' : ''}
+          ${o.showKey ? `<span class="cfg-key">${escapeHtml(o.key)}</span>` : ''}
+        </div>
+        ${o.help ? `<div class="cfg-help">${escapeHtml(o.help)}</div>` : ''}
+        ${hasDefault ? `<div class="cfg-default">Por defecto: ${escapeHtml(cfgFormat(o, o.default))}</div>` : ''}
+      </div>
+      <div class="cfg-row-control">
+        ${cfgControl(o, v)}
+        ${notDefault && !o.readOnly ? `<button type="button" class="btn btn-ghost btn-small" data-act="reset" data-opt="${escapeHtml(o.id)}" title="Volver al valor por defecto">Por defecto</button>` : ''}
+      </div>
+    </div>`;
+}
+
+function cfgRenderMain(server) {
+  const main = document.getElementById('cfgMain');
+  if (!main) return;
+  const msg = cfgUi.message ? `<p class="cfg-msg ${cfgUi.message.kind}">${escapeHtml(cfgUi.message.text)}</p>` : '';
+  if (cfgUi.selected === RULES_ID) {
+    const rules = cfgUi.rules;
+    const notice = !rules
+      ? ''
+      : !rules.worldExists
+        ? '<p class="cfg-msg info">El mundo todavía no se ha creado: arranca el servidor una vez y podrás cambiar sus reglas.</p>'
+        : rules.running
+          ? '<p class="cfg-msg info">El servidor está encendido: al guardar, la app manda los /gamerule y se aplican al momento.</p>'
+          : '<p class="cfg-msg info">Son las reglas de Minecraft de este mundo (se guardan en level.dat, con copia antes). No hace falta ningún mod.</p>';
+    main.innerHTML = `
+      <div class="cfg-title-row"><h3 class="cfg-title">Minecraft (reglas del mundo)</h3></div>
+      ${notice}${msg}
+      ${rules ? cfgSearchBox() + '<div id="cfgSections"></div>' : '<p class="hint">Leyendo las reglas del mundo…</p>'}`;
+    cfgRenderSections(server);
+    return;
+  }
+  const group = (cfgUi.groups || []).find((g) => g.id === cfgUi.selected);
+  if (!group) {
+    main.innerHTML = msg || '<p class="hint">Elige un mod a la izquierda.</p>';
+    return;
+  }
+  const fileInfo = group.files.find((f) => f.rel === cfgUi.fileRel) || group.files[0];
+  const chips = group.files
+    .map((f) => `<button type="button" class="cfg-file${f.rel === cfgUi.fileRel ? ' on' : ''}" data-cfg-file="${escapeHtml(f.rel)}" title="${escapeHtml(f.note || '')}">${escapeHtml(f.rel)}${f.scope === 'serverconfig' && group.files.length > 1 ? ' · manda este' : ''}</button>`)
+    .join('');
+  const file = cfgUi.file;
+  const canForm = file && file.kind === 'toml';
+  main.innerHTML = `
+    <div class="cfg-title-row">
+      <h3 class="cfg-title">${escapeHtml(group.name)}</h3>
+      ${canForm ? `<button type="button" class="btn btn-ghost btn-small" id="cfgTextToggle">${cfgUi.textMode ? 'Ver como formulario' : 'Editar como texto'}</button>` : ''}
+    </div>
+    <div class="cfg-files">${chips}</div>
+    ${fileInfo && fileInfo.note ? `<p class="cfg-msg info">${escapeHtml(fileInfo.note)}.</p>` : ''}
+    ${msg}
+    ${!file ? '<p class="hint">Leyendo el archivo…</p>' : cfgUi.textMode ? `
+      <textarea id="cfgTextArea" class="cfg-textarea" spellcheck="false" aria-label="Contenido de ${escapeHtml(file.name)}">${escapeHtml(cfgUi.textDraft !== null ? cfgUi.textDraft : file.content)}</textarea>
+      <p class="hint">Se comprueba que el formato sea válido antes de guardar.</p>` : file.count === 0 ? '<p class="hint">Este archivo no tiene opciones.</p>' : cfgSearchBox() + '<div id="cfgSections"></div>'}`;
+  main.querySelectorAll('[data-cfg-file]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      if (btn.dataset.cfgFile === cfgUi.fileRel) return;
+      if (!cfgConfirmLeave()) return;
+      cfgOpen(server, cfgUi.selected, btn.dataset.cfgFile);
+    });
+  });
+  const toggle = document.getElementById('cfgTextToggle');
+  if (toggle) {
+    toggle.addEventListener('click', () => {
+      if (!cfgConfirmLeave()) return;
+      cfgUi.edits = {};
+      cfgUi.textDraft = null;
+      cfgUi.textMode = !cfgUi.textMode;
+      cfgRenderMain(server);
+      cfgRenderPending(server);
+    });
+  }
+  const area = document.getElementById('cfgTextArea');
+  if (area) {
+    area.addEventListener('input', () => {
+      cfgUi.textDraft = area.value;
+      cfgRenderPending(server);
+    });
+  }
+  if (!cfgUi.textMode) cfgRenderSections(server);
+}
+
+function cfgSearchBox() {
+  return `<label class="mods-search cfg-search">
+      <span class="visually-hidden">Buscar opción</span>
+      <input type="search" id="cfgSearch" placeholder="Buscar una opción…" value="${escapeHtml(cfgUi.search)}" />
+    </label>`;
+}
+
+function cfgRenderSections(server) {
+  const box = document.getElementById('cfgSections');
+  if (!box) return;
+  const q = cfgUi.search.trim().toLowerCase();
+  const sections = cfgOptions()
+    .map((s) => ({ ...s, options: s.options.filter((o) => !q || `${o.label} ${o.key} ${o.help || ''}`.toLowerCase().includes(q)) }))
+    .filter((s) => s.options.length);
+  box.innerHTML = sections.length
+    ? sections
+        .map((s) => `
+      <section class="cfg-section">
+        <h4>${escapeHtml(s.title)}${s.readOnly ? ' <span class="hint">(solo lectura: edítalo como texto)</span>' : ''}</h4>
+        ${s.help ? `<p class="cfg-help cfg-section-help">${escapeHtml(s.help)}</p>` : ''}
+        ${s.options.map(cfgRow).join('')}
+      </section>`)
+        .join('')
+    : '<p class="hint">Ninguna opción coincide con la búsqueda.</p>';
+  const search = document.getElementById('cfgSearch');
+  if (search && !search.dataset.bound) {
+    search.dataset.bound = '1';
+    search.addEventListener('input', () => {
+      cfgUi.search = search.value;
+      cfgRenderSections(server);
+    });
+  }
+}
+
+function cfgFindOption(id) {
+  for (const s of cfgOptions()) for (const o of s.options) if (o.id === id) return o;
+  return null;
+}
+
+function cfgSetValue(o, value) {
+  if (cfgSame(value, o.value)) delete cfgUi.edits[o.id];
+  else cfgUi.edits[o.id] = value;
+  if (cfgUi.message && cfgUi.message.kind !== 'error') cfgUi.message = null;
+}
+
+/** Repinta una fila sin perder el foco del control que se está usando. */
+function cfgRefreshRow(server, id, { keepFocus = true } = {}) {
+  const row = document.querySelector(`#cfgSections [data-row="${CSS.escape(id)}"]`);
+  const o = cfgFindOption(id);
+  if (!row || !o) return;
+  const active = document.activeElement;
+  const typing = keepFocus && active && row.contains(active) && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA');
+  if (typing) {
+    // Solo actualizar lo de alrededor (marca "sin guardar", botón por defecto, el otro control numérico).
+    const tmp = document.createElement('div');
+    tmp.innerHTML = cfgRow(o);
+    const fresh = tmp.firstElementChild;
+    row.className = fresh.className;
+    row.querySelector('.cfg-row-info').replaceWith(fresh.querySelector('.cfg-row-info'));
+    const v = cfgCurrent(o);
+    row.querySelectorAll('[data-act="num"]').forEach((input) => {
+      if (input !== active) input.value = String(v);
+    });
+    const oldReset = row.querySelector('[data-act="reset"]');
+    const newReset = fresh.querySelector('[data-act="reset"]');
+    if (oldReset && !newReset) oldReset.remove();
+    if (!oldReset && newReset) row.querySelector('.cfg-row-control').appendChild(newReset);
+  } else {
+    const tmp = document.createElement('div');
+    tmp.innerHTML = cfgRow(o);
+    const fresh = tmp.firstElementChild;
+    row.replaceWith(fresh);
+    if (keepFocus && active && active.dataset && active.dataset.opt === id) {
+      const same = fresh.querySelector(`[data-act="${active.dataset.act}"]${active.dataset.value ? `[data-value="${CSS.escape(active.dataset.value)}"]` : ''}`);
+      if (same) same.focus();
+    }
+  }
+  cfgRenderPending(server);
+}
+
+function bindConfigMain(server) {
+  const main = document.getElementById('cfgMain');
+  main.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-act]');
+    if (!btn || !main.contains(btn)) return;
+    const o = cfgFindOption(btn.dataset.opt);
+    if (!o) return;
+    const act = btn.dataset.act;
+    if (act === 'toggle') cfgSetValue(o, !cfgCurrent(o));
+    else if (act === 'choice') cfgSetValue(o, btn.dataset.value);
+    else if (act === 'reset') cfgSetValue(o, o.default);
+    else return;
+    cfgRefreshRow(server, o.id, { keepFocus: act !== 'reset' });
+  });
+  const onInput = (e) => {
+    const input = e.target;
+    const act = input.dataset && input.dataset.act;
+    if (!['num', 'text', 'list', 'raw', 'select'].includes(act)) return;
+    const o = cfgFindOption(input.dataset.opt);
+    if (!o) return;
+    let value = input.value;
+    if (act === 'num') {
+      const n = Number(String(value).replace(',', '.'));
+      value = value.trim() === '' || !Number.isFinite(n) ? value : n;
+    } else if (act === 'list') {
+      value = value.split('\n').map((x) => x.trim()).filter(Boolean);
+    }
+    cfgSetValue(o, value);
+    cfgRefreshRow(server, o.id);
+  };
+  main.addEventListener('input', onInput);
+  main.addEventListener('change', (e) => {
+    if (e.target.dataset && e.target.dataset.act === 'select') onInput(e);
+  });
+}
+
+function cfgRenderPending(server) {
+  const box = document.getElementById('cfgPending');
+  if (!box) return;
+  const items = [];
+  for (const [id, value] of Object.entries(cfgUi.edits)) {
+    const o = cfgFindOption(id);
+    if (o) items.push({ label: o.label, key: o.key, from: cfgFormat(o, o.value), to: cfgFormat(o, value) });
+  }
+  const textChanged = cfgUi.textMode && cfgUi.file && cfgUi.textDraft !== null && cfgUi.textDraft !== cfgUi.file.content;
+  const pending = items.length + (textChanged ? 1 : 0);
+  const rules = cfgUi.selected === RULES_ID;
+  const live = rules && cfgUi.rules && cfgUi.rules.running;
+  box.innerHTML = `
+    <h3 class="cfg-pending-title">${pending ? `${pending} cambio${pending === 1 ? '' : 's'} sin guardar` : 'Sin cambios'}</h3>
+    ${items.length ? `<ul class="cfg-pending-list">${items.map((i) => `
+      <li>
+        <span class="cfg-pending-label">${escapeHtml(i.label)}</span>
+        <span class="cfg-key">${escapeHtml(i.key)}</span>
+        <span class="cfg-pending-values"><s>${escapeHtml(i.from)}</s> → <strong>${escapeHtml(i.to)}</strong></span>
+      </li>`).join('')}</ul>` : ''}
+    ${textChanged ? '<p class="hint">Has cambiado el texto del archivo.</p>' : ''}
+    ${!pending ? '<p class="hint">Cambia cualquier opción y aparecerá aquí.</p>' : ''}
+    <div class="cfg-pending-actions">
+      <button type="button" class="btn btn-accent btn-block" id="cfgSave" ${!pending || cfgUi.busy ? 'disabled' : ''}>${cfgUi.busy ? 'Guardando…' : live ? 'Aplicar ahora' : 'Guardar cambios'}</button>
+      <button type="button" class="btn btn-ghost btn-block" id="cfgDiscard" ${!pending || cfgUi.busy ? 'disabled' : ''}>Descartar</button>
+    </div>
+    <div class="cfg-pending-notes hint">
+      ${rules
+        ? '<span>• Con el servidor encendido se aplican al momento. Apagado, se guardan en el mundo (con copia antes).</span>'
+        : `<span>• Antes de guardar se hace una copia del archivo en <code>config-copias</code>.</span>
+           <span>• Solo cambian los valores: los comentarios y el orden se conservan.</span>
+           <span>• Los cambios se aplican al reiniciar el servidor${cfgUi.running ? ' (ahora está encendido)' : ''}.</span>`}
+    </div>`;
+  document.getElementById('cfgSave').addEventListener('click', () => cfgSave(server));
+  document.getElementById('cfgDiscard').addEventListener('click', () => {
+    cfgUi.edits = {};
+    cfgUi.textDraft = null;
+    cfgUi.message = null;
+    cfgRenderMain(server);
+    cfgRenderPending(server);
+  });
+}
+
+async function cfgSave(server) {
+  if (cfgUi.busy) return;
+  cfgUi.busy = true;
+  cfgRenderPending(server);
+  let res;
+  try {
+    if (cfgUi.selected === RULES_ID) {
+      res = await window.api.setGameRules(server.id, cfgUi.edits);
+    } else if (cfgUi.textMode) {
+      res = await window.api.saveConfig(server.id, cfgUi.fileRel, cfgUi.file.hash, { content: cfgUi.textDraft });
+    } else {
+      res = await window.api.saveConfig(server.id, cfgUi.fileRel, cfgUi.file.hash, { changes: cfgUi.edits });
+    }
+  } catch (error) {
+    res = { ok: false, error: error.message };
+  }
+  cfgUi.busy = false;
+  if (state.selectedId !== server.id || modsUi.view !== 'config') return;
+  if (!res.ok) {
+    cfgUi.message = { kind: 'error', text: res.error };
+    cfgRenderMain(server);
+    cfgRenderPending(server);
+    return;
+  }
+  const isRules = cfgUi.selected === RULES_ID;
+  const text = isRules
+    ? res.live
+      ? '✓ Aplicado: las reglas ya están cambiadas en el servidor.'
+      : `✓ Guardado en el mundo. Copia de level.dat en ${res.backupDir}.`
+    : res.changed === false
+      ? 'No había nada distinto que guardar.'
+      : `✓ Guardado. Copia del archivo anterior en ${res.backupDir}. ${res.running ? 'Reinicia el servidor para aplicarlo.' : 'Se aplicará la próxima vez que enciendas el servidor.'}`;
+  const keepText = cfgUi.textMode;
+  await cfgOpen(server, cfgUi.selected, cfgUi.fileRel);
+  if (keepText && cfgUi.file) cfgUi.textMode = true;
+  cfgUi.message = { kind: 'ok', text };
+  cfgRenderMain(server);
+  cfgRenderPending(server);
+}

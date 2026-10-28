@@ -176,6 +176,16 @@ Tienes dos formas de llevar los mods al servidor:
   progreso y tiempo restante estimado, igual que los backups): eliges dónde
   guardarlo y luego lo descomprimes tú mismo dentro de `mods/`.
 
+### Configurar mods y reglas del mundo
+
+En la pestaña **Mods → Configurar mods** tienes la configuración de cada mod como un formulario (interruptores, barras, botones para elegir) en vez de editar los `.toml` a mano:
+
+- **Minecraft (reglas del mundo)**: las `/gamerule` explicadas en español (porcentaje de jugadores que tienen que dormir, conservar inventario, fuego, mobs…), y también las que añaden los mods. Con el servidor encendido se aplican al momento; apagado, se guardan en `level.dat`.
+- **Cada mod**: la app lee `config/`, `<mundo>/serverconfig/` y `defaultconfigs/`. Si un mod tiene archivo en `serverconfig`, ese es el que **manda** en tu mundo y sale el primero. Los `-client.toml` (solo del juego de cada jugador) están ocultos por defecto.
+- Se respetan los rangos y valores permitidos que vienen en los comentarios del archivo, y cada opción tiene su botón **Por defecto**.
+- Al guardar solo cambian los valores (comentarios y orden se quedan) y antes se hace una copia en `config-copias/<fecha>/` (se guardan las 30 últimas).
+- Los archivos que no son `.toml` (por ejemplo `.json`) se editan como texto, comprobando que el formato sea válido antes de guardar.
+
 ### Importar un mundo existente
 
 Dos formas de meter un mundo que ya tengas:
