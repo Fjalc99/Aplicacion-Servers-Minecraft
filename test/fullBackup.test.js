@@ -193,3 +193,30 @@ test('memoria: máxima y mínima se guardan; mínima mayor que la máxima se rec
   assert.deepEqual(core.handlers['servers:jvmArgsFile'](server.id), { exists: true, maxMb: 8192, minMb: 2048 });
   assert.match(fs.readFileSync(path.join(server.dir, 'user_jvm_args.txt'), 'utf-8'), /-Dmi\.opcion=1/);
 });
+
+test('el trabajo en curso se puede consultar y avisa al empezar, al avanzar y al terminar', async () => {
+  const events = [];
+  let statusDuring = null;
+  let core;
+  core = createAppCore({
+    send: (channel, payload) => {
+      if (!channel.startsWith('servers:job:')) return;
+      events.push(payload);
+      if (!payload.done && payload.info && !statusDuring) statusDuring = core.handlers['servers:jobStatus'](payload.serverId);
+    },
+    notify: () => {},
+  });
+  const server = makeServer('progreso');
+  assert.equal(core.handlers['servers:jobStatus'](server.id), null);
+
+  const result = await core.handlers['servers:createFullBackup'](server.id, ctx);
+  assert.equal(result.ok, true, result.error);
+  assert.equal(events[0].job, 'fullBackup');
+  assert.equal(events[0].phase, 'start');
+  assert.ok(events.some((e) => e.info && e.info.totalCount > 0), 'manda el avance');
+  assert.ok(statusDuring && statusDuring.job === 'fullBackup', 'mientras dura, jobStatus lo devuelve');
+  const last = events[events.length - 1];
+  assert.equal(last.done, true);
+  assert.equal(last.ok, true);
+  assert.equal(core.handlers['servers:jobStatus'](server.id), null, 'al terminar ya no hay trabajo');
+});

@@ -36,6 +36,7 @@ const FRIEND_CHANNELS = new Set([
   'servers:resourceUsage',
   'servers:systemMemory',
   'servers:listBackups',
+  'servers:jobStatus',
   'servers:readPlayerList',
   'servers:start',
   'servers:stop',

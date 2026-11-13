@@ -130,6 +130,48 @@ function createAppCore({ send, notify, minuteMs = 60 * 1000 }) {
     }
   }
 
+  // Estado del trabajo largo en curso de cada servidor (backup, restaurar,
+  // actualizar), para que la interfaz pueda volver a pintar la barra de
+  // progreso aunque cambies de pestaña, de servidor o recargues la página.
+  // serverId -> { job, startedAt, phase, info, text }
+  const jobStates = new Map();
+
+  function jobStart(serverId, job) {
+    const st = { job, startedAt: Date.now(), phase: 'start', info: null, text: '' };
+    jobStates.set(serverId, st);
+    send(`servers:job:${serverId}`, { serverId, ...st });
+  }
+
+  /** info: { phase?, doneBytes, totalBytes, doneCount, totalCount } o { phase, received, total }. */
+  function jobProgress(serverId, info) {
+    const st = jobStates.get(serverId);
+    if (!st) return;
+    if (info.phase) st.phase = info.phase;
+    if (info.phase === 'log') return; // el texto va por la consola
+    if (info.text !== undefined) st.text = info.text;
+    st.info = info;
+    send(`servers:job:${serverId}`, { serverId, ...st });
+  }
+
+  function jobEnd(serverId, outcome) {
+    const st = jobStates.get(serverId);
+    jobStates.delete(serverId);
+    send(`servers:job:${serverId}`, { serverId, job: st ? st.job : null, done: true, ...outcome });
+  }
+
+  /** Ejecuta fn como trabajo visible (con barra) y avisa al terminar, salga bien o mal. */
+  async function trackedJob(serverId, job, fn) {
+    jobStart(serverId, job);
+    try {
+      const result = await fn();
+      jobEnd(serverId, { ok: true });
+      return result;
+    } catch (err) {
+      jobEnd(serverId, { ok: false, error: err.message });
+      throw err;
+    }
+  }
+
   // Esperas a una línea concreta de la consola (p. ej. "Saved the game").
   const logWaiters = new Map(); // serverId -> Set<fn(line)>
 
@@ -449,14 +491,26 @@ function createAppCore({ send, notify, minuteMs = 60 * 1000 }) {
     // ---------- Backups ----------
     'servers:listBackups': (id) => backupManager.listBackups(requireServer(id)),
 
+    // Trabajo largo en curso (backup, restaurar, actualizar) o null.
+    'servers:jobStatus': (id) => {
+      requireServer(id);
+      const st = jobStates.get(id);
+      return st ? { serverId: id, ...st } : null;
+    },
+
     'servers:createBackup': async (id, ctx) => {
       try {
         const server = requireServer(id);
         const result = await runBackupJob(id, 'backup', () =>
-          withSavesPaused(server, () =>
-            backupManager.createBackup(server, {
-              onProgress: (info) => ctx.reply(`servers:backupProgress:${id}`, info),
-            })
+          trackedJob(id, 'backup', () =>
+            withSavesPaused(server, () =>
+              backupManager.createBackup(server, {
+                onProgress: (info) => {
+                  jobProgress(id, info);
+                  if (ctx && ctx.reply) ctx.reply(`servers:backupProgress:${id}`, info);
+                },
+              })
+            )
           )
         );
         return { ok: true, ...result };
@@ -470,10 +524,15 @@ function createAppCore({ send, notify, minuteMs = 60 * 1000 }) {
       try {
         const server = requireServer(id);
         const result = await runBackupJob(id, 'backup', () =>
-          withSavesPaused(server, () =>
-            backupManager.createFullBackup(server, {
-              onProgress: (info) => ctx.reply(`servers:backupProgress:${id}`, info),
-            })
+          trackedJob(id, 'fullBackup', () =>
+            withSavesPaused(server, () =>
+              backupManager.createFullBackup(server, {
+                onProgress: (info) => {
+                  jobProgress(id, info);
+                  if (ctx && ctx.reply) ctx.reply(`servers:backupProgress:${id}`, info);
+                },
+              })
+            )
           )
         );
         return { ok: true, ...result };
@@ -488,15 +547,18 @@ function createAppCore({ send, notify, minuteMs = 60 * 1000 }) {
         const server = requireServer(id);
         if (javaProcess.isRunning(id)) throw new Error('Detén el servidor antes de restaurar un backup.');
         if (!backupManager.isFullBackup(fileName)) {
-          const result = await runBackupJob(id, 'restore', async () => backupManager.restoreBackup(server, fileName));
+          const result = await runBackupJob(id, 'restore', () => trackedJob(id, 'restore', async () => backupManager.restoreBackup(server, fileName)));
           return { ok: true, kind: 'world', ...result };
         }
-        const result = await runBackupJob(id, 'restore', async () => {
+        const result = await runBackupJob(id, 'restore', () => trackedJob(id, 'restoreFull', async () => {
           if (javaProcess.isRunning(id)) throw new Error('Detén el servidor antes de restaurar un backup.');
           return backupManager.restoreFullBackup(server, fileName, {
-            onProgress: (info) => ctx && ctx.reply && ctx.reply(`servers:backupProgress:${id}`, info),
+            onProgress: (info) => {
+              jobProgress(id, info);
+              if (ctx && ctx.reply) ctx.reply(`servers:backupProgress:${id}`, info);
+            },
           });
-        });
+        }));
         const updated = serverManager.reloadPropertiesFromDisk(id);
         return { ok: true, kind: 'full', ...result, server: updated };
       } catch (err) {
@@ -569,7 +631,10 @@ function createAppCore({ send, notify, minuteMs = 60 * 1000 }) {
     },
 
     'servers:updateVersion': async ({ id, version }, ctx) => {
-      const progress = (info) => ctx && ctx.reply && ctx.reply(`servers:updateProgress:${id}`, info);
+      const progress = (info) => {
+        jobProgress(id, info);
+        if (ctx && ctx.reply) ctx.reply(`servers:updateProgress:${id}`, info);
+      };
       const log = (text) => {
         progress({ phase: 'log', text });
         send(`servers:log:${id}`, text);
@@ -581,7 +646,7 @@ function createAppCore({ send, notify, minuteMs = 60 * 1000 }) {
           const java = serverManager.checkJava();
           if (!java.ok) throw new Error(java.message);
         }
-        const result = await runBackupJob(id, 'update', async () => {
+        const result = await runBackupJob(id, 'update', () => trackedJob(id, 'update', async () => {
           if (javaProcess.isRunning(id)) throw new Error('Detén el servidor antes de actualizarlo.');
           // 1) Backup completo, por si hay que volver atrás
           log('\n[Actualizar versión] Haciendo un backup completo antes de tocar nada…\n');
@@ -597,7 +662,7 @@ function createAppCore({ send, notify, minuteMs = 60 * 1000 }) {
           const saved = { ...store.getServer(id), ...fields };
           store.saveServer(saved);
           return { server: saved, backupFileName: backup.fileName };
-        });
+        }));
         progress({ phase: 'done' });
         return { ok: true, ...result };
       } catch (err) {
@@ -657,12 +722,15 @@ function createAppCore({ send, notify, minuteMs = 60 * 1000 }) {
     },
 
     'mods:applyUpdates': async ({ serverId, fileNames, fullBackup, includeBeta }, ctx) => {
-      const progress = (info) => ctx && ctx.reply && ctx.reply(`mods:updateProgress:${serverId}`, info);
+      const progress = (info) => {
+        jobProgress(serverId, info);
+        if (ctx && ctx.reply) ctx.reply(`mods:updateProgress:${serverId}`, info);
+      };
       try {
         const server = requireServer(serverId);
         if (javaProcess.isRunning(serverId)) throw new Error('Detén el servidor antes de actualizar mods.');
         if (!Array.isArray(fileNames) || fileNames.length === 0) throw new Error('No has elegido ningún mod.');
-        const result = await runBackupJob(serverId, 'update', async () => {
+        const result = await runBackupJob(serverId, 'update', () => trackedJob(serverId, 'modUpdate', async () => {
           if (javaProcess.isRunning(serverId)) throw new Error('Detén el servidor antes de actualizar mods.');
           let backupFileName = null;
           if (fullBackup) {
@@ -676,7 +744,7 @@ function createAppCore({ send, notify, minuteMs = 60 * 1000 }) {
             onProgress: (info) => progress(info),
           });
           return { ...applied, backupFileName };
-        });
+        }));
         progress({ phase: 'done' });
         return { ok: true, ...result };
       } catch (err) {

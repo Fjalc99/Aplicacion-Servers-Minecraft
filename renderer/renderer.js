@@ -156,7 +156,7 @@ function formatSeconds(s) {
  * evento { doneBytes, totalBytes, doneCount, totalCount } y calcula un tiempo
  * restante aproximado según lo que se lleva tardado hasta ahora.
  */
-function renderProgressBar(container, info, startTime) {
+function renderProgressBar(container, info, startTime, label = '') {
   const fraction = info.totalBytes > 0
     ? info.doneBytes / info.totalBytes
     : (info.totalCount > 0 ? info.doneCount / info.totalCount : 0);
@@ -170,7 +170,7 @@ function renderProgressBar(container, info, startTime) {
   container.innerHTML = `
     <div class="progress-bar-wrap">
       <div class="progress-bar-track"><div class="progress-bar-fill" style="width:${pct}%"></div></div>
-      <span class="progress-bar-label">${pct}% (${info.doneCount}/${info.totalCount})${etaText}</span>
+      <span class="progress-bar-label">${label ? `${escapeHtml(label)} · ` : ''}${pct}% (${info.doneCount}/${info.totalCount})${etaText}</span>
     </div>
   `;
 }
@@ -973,6 +973,7 @@ function renderOverview(server) {
 
   document.getElementById('backupNowBtn').addEventListener('click', () => runBackup(server, 'world'));
   document.getElementById('fullBackupBtn').addEventListener('click', () => runBackup(server, 'full'));
+  syncJob(server.id);
 
   document.getElementById('exportLocalBtn').addEventListener('click', () => openLocalWorldPanel(server, 'export'));
   document.getElementById('importLocalBtn').addEventListener('click', () => openLocalWorldPanel(server, 'import'));
@@ -1012,6 +1013,172 @@ function progressPlaceholder(text) {
   return `<div class="progress-bar-wrap"><div class="progress-bar-track"><div class="progress-bar-fill" style="width:0%"></div></div><span class="progress-bar-label">${escapeHtml(text)}</span></div>`;
 }
 
+// ---------------------------------------------------------------------------
+// Trabajos largos (backup, restaurar, actualizar versión): la barra de progreso
+// se guarda aquí y se vuelve a pintar cada vez que aparece su tarjeta, así no
+// se pierde al cambiar de pestaña o de servidor, ni al recargar la web.
+// ---------------------------------------------------------------------------
+
+const jobUi = {
+  states: new Map(), // serverId -> { job, startedAt, phase, info }
+  results: new Map(), // serverId -> { area: 'backup' | 'version', html }
+  logs: new Map(), // serverId -> texto del registro de la actualización
+  watching: new Set(),
+};
+const BACKUP_JOBS = new Set(['backup', 'fullBackup', 'restore', 'restoreFull']);
+const JOB_LABEL = {
+  backup: 'Haciendo backup del mundo…',
+  fullBackup: 'Haciendo backup completo…',
+  restore: 'Restaurando el backup…',
+  restoreFull: 'Restaurando el backup completo…',
+  update: 'Actualizando la versión…',
+  modUpdate: 'Actualizando mods…',
+};
+
+function watchJobs(serverId) {
+  if (jobUi.watching.has(serverId)) return;
+  jobUi.watching.add(serverId);
+  window.api.onJob(serverId, (st) => {
+    if (st.done) {
+      jobUi.states.delete(serverId);
+      // Mensaje por defecto (p. ej. si lo empezó otra ventana); quien lo
+      // empezó lo cambia por uno con más detalle al recibir el resultado.
+      const area = st.job === 'update' ? 'version' : st.job === 'modUpdate' ? 'mods' : 'backup';
+      jobUi.results.set(serverId, {
+        area,
+        at: Date.now(),
+        html: st.ok ? '✓ Terminado.' : `<span class="error-text">Error: ${escapeHtml(st.error || 'desconocido')}</span>`,
+      });
+      paintJob(serverId);
+      if (state.selectedId === serverId && area === 'backup') {
+        const server = state.servers.find((x) => x.id === serverId);
+        if (server) refreshBackupsList(server);
+      }
+      return;
+    }
+    jobUi.states.set(serverId, { job: st.job, startedAt: st.startedAt, phase: st.phase, info: st.info });
+    if (st.phase === 'start') jobUi.results.delete(serverId);
+    paintJob(serverId);
+  });
+}
+
+/** Pregunta al motor si hay un trabajo en curso (al abrir un servidor o recargar). */
+async function syncJob(serverId) {
+  watchJobs(serverId);
+  try {
+    const st = await window.api.getJobStatus(serverId);
+    if (st) jobUi.states.set(serverId, { job: st.job, startedAt: st.startedAt, phase: st.phase, info: st.info });
+    else jobUi.states.delete(serverId);
+  } catch (error) {
+    /* sin estado: no pasa nada */
+  }
+  paintJob(serverId);
+}
+
+/** Empieza a mostrar un trabajo al momento, antes del primer aviso del motor. */
+function jobStartedLocally(serverId, job) {
+  watchJobs(serverId);
+  jobUi.results.delete(serverId);
+  if (job === 'update') jobUi.logs.set(serverId, '');
+  jobUi.states.set(serverId, { job, startedAt: Date.now(), phase: 'start', info: null });
+  paintJob(serverId);
+}
+
+function jobFinishedLocally(serverId, area, html) {
+  jobUi.states.delete(serverId);
+  jobUi.results.set(serverId, { area, html, at: Date.now() });
+  paintJob(serverId);
+}
+
+function paintJobInto(el, st) {
+  const info = st.info;
+  let label = JOB_LABEL[st.job] || 'Trabajando…';
+  if (st.job === 'update') {
+    if (st.phase === 'backup' || st.phase === 'start') label = 'Haciendo backup completo antes de actualizar…';
+    else if (st.phase === 'download') label = 'Descargando el instalador…';
+    else if (st.phase === 'install') label = 'Instalando (descarga librerías; puede tardar un par de minutos)…';
+  }
+  if (st.job === 'modUpdate') {
+    if (st.phase === 'backup' || st.phase === 'start') label = 'Haciendo backup completo antes de actualizar los mods…';
+    if (info && info.phase === 'download' && info.total) {
+      const pct = Math.round(((info.index - 1) / info.total) * 100);
+      el.innerHTML = `<div class="progress-bar-wrap"><div class="progress-bar-track"><div class="progress-bar-fill" style="width:${pct}%"></div></div><span class="progress-bar-label">Descargando ${info.index} de ${info.total}: ${escapeHtml(info.name || '')}…</span></div>`;
+      return;
+    }
+  }
+  if (info && (info.totalBytes > 0 || info.totalCount > 0)) {
+    renderProgressBar(el, info, st.startedAt, label);
+  } else if (info && info.phase === 'download' && info.total) {
+    const pct = Math.round((info.received / info.total) * 100);
+    el.innerHTML = `<div class="progress-bar-wrap"><div class="progress-bar-track"><div class="progress-bar-fill" style="width:${pct}%"></div></div><span class="progress-bar-label">${escapeHtml(label)} · ${pct}%</span></div>`;
+  } else {
+    el.innerHTML = progressPlaceholder(label);
+  }
+}
+
+function paintJob(serverId) {
+  if (state.selectedId !== serverId) return;
+  const st = jobUi.states.get(serverId);
+  const backupEl = document.getElementById('backupNowMsg');
+  const versionEl = document.getElementById('versionProgress');
+  const modsEl = document.getElementById('modsStatus');
+  const versionBtn = document.getElementById('versionUpdateBtn');
+  const versionSel = document.getElementById('versionSelect');
+  const logEl = document.getElementById('versionLog');
+  if (logEl) {
+    const log = jobUi.logs.get(serverId);
+    if (log) {
+      logEl.hidden = false;
+      if (logEl.textContent !== log) {
+        logEl.textContent = log;
+        logEl.scrollTop = logEl.scrollHeight;
+      }
+    }
+  }
+  if (st) {
+    const isBackup = BACKUP_JOBS.has(st.job);
+    const own = isBackup ? backupEl : st.job === 'update' ? versionEl : modsEl;
+    if (own) {
+      paintJobInto(own, st);
+      own.dataset.jobBusy = '1';
+    }
+    // La tarjeta de backups avisa de que hay otra cosa en marcha.
+    if (!isBackup && backupEl) {
+      backupEl.innerHTML = st.job === 'update'
+        ? '<span class="hint">Se está actualizando la versión del servidor (pestaña Configuración); los backups esperan a que termine.</span>'
+        : '<span class="hint">Se están actualizando mods (pestaña Mods); los backups esperan a que termine.</span>';
+      backupEl.dataset.jobBusy = '1';
+    }
+    setBackupButtonsDisabled(true);
+    if (versionBtn) versionBtn.disabled = true;
+    if (versionSel) versionSel.disabled = true;
+    return;
+  }
+  // El mensaje final se sigue enseñando un rato (10 min) al volver a la tarjeta.
+  let r = jobUi.results.get(serverId);
+  if (r && Date.now() - r.at > 10 * 60 * 1000) {
+    jobUi.results.delete(serverId);
+    r = null;
+  }
+  // El resultado se escribe si la caja está vacía (tarjeta recién pintada) o
+  // aún tiene la barra; si ya muestra otro mensaje (p. ej. de una descarga), se respeta.
+  const fresh = (el) => el && (el.innerHTML.trim() === '' || el.querySelector('.progress-bar-wrap') || el.dataset.jobBusy === '1' || el.dataset.jobResult === '1');
+  const put = (el, area) => {
+    if (!fresh(el)) return;
+    const mine = r && r.area === area;
+    el.innerHTML = mine ? r.html : '';
+    if (mine) el.dataset.jobResult = '1';
+    else delete el.dataset.jobResult;
+    delete el.dataset.jobBusy;
+  };
+  put(backupEl, 'backup');
+  put(versionEl, 'version');
+  put(modsEl, 'mods');
+  setBackupButtonsDisabled(false);
+  if (versionBtn) versionBtn.disabled = false;
+  if (versionSel) versionSel.disabled = false;
+}
+
 function setBackupButtonsDisabled(disabled) {
   for (const el of document.querySelectorAll('#backupNowBtn, #fullBackupBtn, #backupsList button')) {
     el.disabled = disabled;
@@ -1028,29 +1195,23 @@ function skippedNote(skipped) {
 
 /** kind: 'world' (solo el mundo) o 'full' (carpeta entera del servidor). */
 async function runBackup(server, kind) {
-  const msg = document.getElementById('backupNowMsg');
-  setBackupButtonsDisabled(true);
-  msg.innerHTML = progressPlaceholder(kind === 'full' ? 'Preparando backup completo…' : 'Preparando…');
-
-  const startTime = Date.now();
-  window.api.onBackupProgress(server.id, (info) => renderProgressBar(msg, info, startTime));
+  jobStartedLocally(server.id, kind === 'full' ? 'fullBackup' : 'backup');
+  let html;
   try {
     const result = kind === 'full'
       ? await window.api.createFullBackup(server.id)
       : await window.api.createBackup(server.id);
     if (!result.ok) {
-      msg.innerHTML = `<span class="error-text">Error: ${escapeHtml(result.error)}</span>`;
-      return;
+      html = `<span class="error-text">Error: ${escapeHtml(result.error)}</span>`;
+    } else {
+      const label = kind === 'full' ? 'Backup completo creado' : 'Backup del mundo creado';
+      html = `${label} (${formatSize(result.size)}).${skippedNote(result.skipped)}`;
     }
-    const label = kind === 'full' ? 'Backup completo creado' : 'Backup del mundo creado';
-    msg.innerHTML = `${label} (${formatSize(result.size)}).${skippedNote(result.skipped)}`;
   } catch (error) {
-    msg.innerHTML = `<span class="error-text">Error: ${escapeHtml(error.message)}</span>`;
-  } finally {
-    window.api.removeBackupProgressListeners(server.id);
-    setBackupButtonsDisabled(false);
-    refreshBackupsList(server);
+    html = `<span class="error-text">Error: ${escapeHtml(error.message)}</span>`;
   }
+  jobFinishedLocally(server.id, 'backup', html);
+  if (state.selectedId === server.id) refreshBackupsList(server);
 }
 
 // ---------------------------------------------------------------------------
@@ -1304,32 +1465,26 @@ async function refreshBackupsList(server) {
       );
       if (!ok) return;
 
-      setBackupButtonsDisabled(true);
-      msg.innerHTML = progressPlaceholder('Restaurando…');
-      const startTime = Date.now();
-      window.api.onBackupProgress(server.id, (info) => renderProgressBar(msg, info, startTime));
+      jobStartedLocally(server.id, full ? 'restoreFull' : 'restore');
+      let html;
       try {
         const result = await window.api.restoreBackup(server.id, btn.dataset.file);
         if (!result.ok) {
-          msg.innerHTML = `<span class="error-text">Error: ${escapeHtml(result.error)}</span>`;
-          return;
-        }
-        if (result.kind === 'full') {
-          msg.innerHTML = `Backup completo restaurado. Tu versión anterior está en <code>${escapeHtml(result.previousSavedAs)}</code>; bórrala cuando compruebes que todo va bien.`;
+          html = `<span class="error-text">Error: ${escapeHtml(result.error)}</span>`;
+        } else if (result.kind === 'full') {
+          html = `Backup completo restaurado. Tu versión anterior está en <code>${escapeHtml(result.previousSavedAs)}</code>; bórrala cuando compruebes que todo va bien.`;
           if (result.server) {
             const i = state.servers.findIndex((s) => s.id === server.id);
             if (i !== -1) state.servers[i] = { ...state.servers[i], ...result.server };
           }
         } else {
-          msg.textContent = 'Backup del mundo restaurado.';
+          html = 'Backup del mundo restaurado.';
         }
       } catch (error) {
-        msg.innerHTML = `<span class="error-text">Error: ${escapeHtml(error.message)}</span>`;
-      } finally {
-        window.api.removeBackupProgressListeners(server.id);
-        setBackupButtonsDisabled(false);
-        refreshBackupsList(server);
+        html = `<span class="error-text">Error: ${escapeHtml(error.message)}</span>`;
       }
+      jobFinishedLocally(server.id, 'backup', html);
+      if (state.selectedId === server.id) refreshBackupsList(server);
     });
   });
 
@@ -1436,6 +1591,8 @@ function bindMemoryCard(server) {
     document.getElementById('cfgUseJvmFile').addEventListener('click', () => save(fileMax, fileMin));
   }
   checkJvmFile();
+
+  if (jobUi.states.has(server.id)) setBackupButtonsDisabled(true);
 }
 
 /** Tarjeta "Versión del servidor": ver la versión instalada y cambiarla. */
@@ -1497,6 +1654,7 @@ async function renderVersionCard(server) {
     <div id="versionProgress" class="hint" style="margin-top:10px;"></div>
     <pre id="versionLog" class="version-log" hidden></pre>
   `;
+  syncJob(server.id);
 
   const btn = document.getElementById('versionUpdateBtn');
   if (!btn) return;
@@ -1520,56 +1678,33 @@ async function renderVersionCard(server) {
     lines.push('', '¿Continuar?');
     if (!confirm(lines.join('\n'))) return;
 
-    const progressEl = document.getElementById('versionProgress');
-    const logEl = document.getElementById('versionLog');
-    btn.disabled = true;
-    document.getElementById('versionSelect').disabled = true;
-    logEl.hidden = false;
-    logEl.textContent = '';
-    progressEl.innerHTML = progressPlaceholder('Haciendo backup completo…');
-    const startTime = Date.now();
-    let phase = 'backup';
-
+    jobStartedLocally(server.id, 'update');
     window.api.onUpdateProgress(server.id, (p) => {
-      if (p.phase === 'backup') {
-        renderProgressBar(progressEl, p, startTime);
-      } else if (p.phase === 'download') {
-        if (phase !== 'download') phase = 'download';
-        const pct = p.total ? Math.round((p.received / p.total) * 100) : null;
-        progressEl.textContent = pct !== null ? `Descargando… ${pct}%` : `Descargando… ${(p.received / 1024 / 1024).toFixed(1)} MB`;
-      } else if (p.phase === 'install') {
-        phase = 'install';
-        progressEl.textContent = 'Instalando (descarga librerías; puede tardar un par de minutos)…';
-      } else if (p.phase === 'log' && p.text) {
-        logEl.textContent = (logEl.textContent + p.text).slice(-20000);
-        logEl.scrollTop = logEl.scrollHeight;
+      if (p.phase === 'log' && p.text) {
+        jobUi.logs.set(server.id, ((jobUi.logs.get(server.id) || '') + p.text).slice(-20000));
+        paintJob(server.id);
       }
     });
 
+    let html;
     try {
       const result = await window.api.updateVersion(server.id, target);
       if (!result.ok) {
-        progressEl.innerHTML = `<span class="error-text">No se pudo actualizar: ${escapeHtml(result.error)}</span><br><span class="hint">Si se llegó a tocar algo, tienes el backup completo en la pestaña Resumen → Copias de seguridad.</span>`;
-        return;
-      }
-      const i = state.servers.findIndex((s) => s.id === server.id);
-      if (i !== -1) state.servers[i] = { ...state.servers[i], ...result.server };
-      Object.assign(server, result.server);
-      renderSidebar();
-      await renderVersionCard(server);
-      const done = document.getElementById('versionProgress');
-      if (done) {
-        done.innerHTML = `<span class="settings-status good">✓ Actualizado a ${escapeHtml(target)}.</span> Backup previo: <code>${escapeHtml(result.backupFileName)}</code>. Ya puedes iniciar el servidor; la primera vez tarda un poco más.`;
+        html = `<span class="error-text">No se pudo actualizar: ${escapeHtml(result.error)}</span><br><span class="hint">Si se llegó a tocar algo, tienes el backup completo en la pestaña Resumen → Copias de seguridad.</span>`;
+      } else {
+        const i = state.servers.findIndex((s) => s.id === server.id);
+        if (i !== -1) state.servers[i] = { ...state.servers[i], ...result.server };
+        Object.assign(server, result.server);
+        renderSidebar();
+        html = `<span class="settings-status good">✓ Actualizado a ${escapeHtml(target)}.</span> Backup previo: <code>${escapeHtml(result.backupFileName)}</code>. Ya puedes iniciar el servidor; la primera vez tarda un poco más.`;
       }
     } catch (error) {
-      progressEl.innerHTML = `<span class="error-text">Error: ${escapeHtml(error.message)}</span>`;
+      html = `<span class="error-text">Error: ${escapeHtml(error.message)}</span>`;
     } finally {
       window.api.removeUpdateProgressListeners(server.id);
-      const b = document.getElementById('versionUpdateBtn');
-      if (b) b.disabled = false;
-      const sel = document.getElementById('versionSelect');
-      if (sel) sel.disabled = false;
     }
+    jobFinishedLocally(server.id, 'version', html);
+    if (state.selectedId === server.id && document.getElementById('versionCard')) await renderVersionCard(server);
   });
 }
 
@@ -1871,6 +2006,7 @@ async function renderServerModsView(server) {
   document.getElementById('modsConfig').addEventListener('click', () => { modsUi.view = 'config'; renderMods(server); });
   document.getElementById('modsSync').addEventListener('click', () => { modsUi.view = 'sync'; renderMods(server); });
   document.getElementById('modsCheckUpdates').addEventListener('click', () => checkServerModUpdates(server, { force: true }));
+  syncJob(server.id);
   document.getElementById('modsSearch').addEventListener('input', (e) => {
     modsUi.search = e.target.value;
     renderServerModsBody(server);
@@ -2179,34 +2315,32 @@ async function updateModsUi(server, fileNames) {
   let msg = `Se actualizarán ${fileNames.length} mod(s). Antes se hará un backup completo del servidor y las versiones viejas se guardan en mods-antiguos-<fecha>.`;
   if (withDeps.length) msg += `\n\nOjo: ${withDeps.map((u) => `${u.name} necesita ${u.missingDeps.join(', ')}`).join('; ')}.`;
   if (!confirm(`${msg}\n\n¿Continuar?`)) return;
-  const status = document.getElementById('modsStatus');
-  const startTime = Date.now();
-  status.innerHTML = progressPlaceholder('Haciendo backup completo…');
-  window.api.onModUpdateProgress(server.id, (p) => {
-    if (p.phase === 'backup') renderProgressBar(status, p, startTime);
-    else if (p.phase === 'download') status.textContent = `Descargando ${p.index} de ${p.total}: ${p.name}…`;
-  });
+  jobStartedLocally(server.id, 'modUpdate');
+  let html;
+  let res;
   try {
-    const res = await window.api.applyModUpdates(server.id, fileNames, { fullBackup: true });
+    res = await window.api.applyModUpdates(server.id, fileNames, { fullBackup: true });
     if (!res.ok) {
-      status.innerHTML = `<span class="error-text">${escapeHtml(res.error)}</span>`;
-      return;
+      html = `<span class="error-text">${escapeHtml(res.error)}</span>`;
+    } else {
+      html = `<span class="settings-status good">✓ ${res.updated.length} mod(s) actualizados.</span>`;
+      if (res.failed.length) html += ` <span class="error-text">Fallaron: ${res.failed.map((f) => `${escapeHtml(f.name)} (${escapeHtml(f.error)})`).join('; ')}</span>`;
+      html += ' Arranca el servidor para comprobarlo y que tus amigos actualicen con "Pasar mods con mi Minecraft".';
     }
-    let html = `<span class="settings-status good">✓ ${res.updated.length} mod(s) actualizados.</span>`;
-    if (res.failed.length) html += ` <span class="error-text">Fallaron: ${res.failed.map((f) => `${escapeHtml(f.name)} (${escapeHtml(f.error)})`).join('; ')}</span>`;
-    html += ' Arranca el servidor para comprobarlo y que tus amigos actualicen con "Pasar mods con mi Minecraft".';
-    status.innerHTML = html;
+  } catch (error) {
+    html = `<span class="error-text">${escapeHtml(error.message)}</span>`;
+  }
+  jobFinishedLocally(server.id, 'mods', html);
+  if (res && res.ok) {
     for (const u of res.updated) {
       if (modsUi.selected.delete(u.fileName)) modsUi.selected.add(u.newFileName);
       if (modsUi.open === u.fileName) modsUi.open = u.newFileName;
     }
     delete modUpdateCache[server.id];
-    await loadServerMods(server);
-    checkServerModUpdates(server, { force: false, quiet: true });
-  } catch (error) {
-    status.innerHTML = `<span class="error-text">${escapeHtml(error.message)}</span>`;
-  } finally {
-    window.api.removeModUpdateProgressListeners(server.id);
+    if (state.selectedId === server.id && modsUi.view === 'list') {
+      await loadServerMods(server);
+      checkServerModUpdates(server, { force: false, quiet: true });
+    }
   }
 }
 

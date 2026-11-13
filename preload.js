@@ -86,6 +86,8 @@ contextBridge.exposeInMainWorld('api', {
   deleteBackup: (id, fileName) => ipcRenderer.invoke('servers:deleteBackup', { id, fileName }),
   onBackupProgress: (id, cb) => ipcRenderer.on(`servers:backupProgress:${id}`, (e, info) => cb(info)),
   removeBackupProgressListeners: (id) => ipcRenderer.removeAllListeners(`servers:backupProgress:${id}`),
+  getJobStatus: (id) => ipcRenderer.invoke('servers:jobStatus', id),
+  onJob: (id, cb) => ipcRenderer.on(`servers:job:${id}`, (e, info) => cb(info)),
 
   // Catálogo
   listVanillaVersions: () => ipcRenderer.invoke('catalog:vanillaVersions'),

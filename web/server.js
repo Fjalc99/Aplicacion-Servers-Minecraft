@@ -222,7 +222,7 @@ function createWebServer() {
   const backupDownloads = new Map();
 
   // Canales de eventos que pertenecen a un servidor concreto: servers:log:<id>, etc.
-  const SERVER_EVENT = /^servers:(?:log|exit|players|backupProgress):(.+)$/;
+  const SERVER_EVENT = /^servers:(?:log|exit|players|backupProgress|job):(.+)$/;
 
   function send(client, message) {
     if (client.readyState === 1) client.send(message);

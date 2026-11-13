@@ -57,6 +57,7 @@ const OWNER_CHANNELS = new Set([
   'servers:getPlayers',
   'servers:resourceUsage',
   'servers:listBackups',
+  'servers:jobStatus',
   'servers:readPlayerList',
   'servers:removeFromPlayerList',
   'servers:start',
