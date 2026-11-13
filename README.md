@@ -186,6 +186,22 @@ En la pestaña **Mods → Configurar mods** tienes la configuración de cada mod
 - Al guardar solo cambian los valores (comentarios y orden se quedan) y antes se hace una copia en `config-copias/<fecha>/` (se guardan las 30 últimas).
 - Los archivos que no son `.toml` (por ejemplo `.json`) se editan como texto, comprobando que el formato sea válido antes de guardar.
 
+### Historial de cambios (pestaña Cambios)
+
+Cada servidor tiene una pestaña **Cambios** con un historial que la app apunta sola:
+
+- Mods **añadidos, quitados, actualizados** (con la versión de antes y la nueva), **activados y desactivados**.
+- Cambio de versión de NeoForge, Forge o Minecraft.
+- Opciones de configuración de mods y reglas del mundo que cambies desde la app (valor de antes → nuevo).
+- Backups restaurados.
+- Notas que escribas a mano (por ejemplo "nuevo modpack, descargadlo").
+
+Si cambias la carpeta `mods` a mano, sin la app, también lo detecta: compara la carpeta con la última vez que la miró (al abrir la pestaña, al arrancar el servidor o antes de cada operación) y lo marca como **"Cambiado en la carpeta"**. Los cambios seguidos (en menos de 30 minutos) se juntan en una sola entrada.
+
+El botón **Copiar para Discord** copia la entrada más reciente (o las que marques) ya con formato para pegar en un canal. Los amigos con acceso al servidor ven el historial desde la web; en los servidores compartidos no pueden añadir notas ni borrar entradas.
+
+El historial se guarda en la carpeta de datos de la app (`cambios/<id>.json`), no en la del servidor, así que restaurar un backup no lo borra.
+
 ### Importar un mundo existente
 
 Dos formas de meter un mundo que ya tengas:

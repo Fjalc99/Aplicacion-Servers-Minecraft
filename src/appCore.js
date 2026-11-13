@@ -21,6 +21,7 @@ const localWorld = require('./localWorld');
 const modUpdater = require('./modUpdater');
 const serverMods = require('./serverMods');
 const modConfig = require('./modConfig');
+const changelog = require('./changelog');
 
 /** Primera IPv4 de la red local (la que usan los que están en tu misma WiFi). */
 function lanIpv4() {
@@ -157,6 +158,28 @@ function createAppCore({ send, notify, minuteMs = 60 * 1000 }) {
     const st = jobStates.get(serverId);
     jobStates.delete(serverId);
     send(`servers:job:${serverId}`, { serverId, job: st ? st.job : null, done: true, ...outcome });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Historial de cambios: nunca debe romper la operación que lo apunta.
+  // ---------------------------------------------------------------------------
+  function byOf(ctx) {
+    return (ctx && ctx.user && ctx.user.username) || null;
+  }
+  function logModsBefore(server) {
+    try {
+      changelog.recordModChanges(server, { source: 'detected' });
+    } catch (err) { /* sin historial */ }
+  }
+  function logModsAfter(server, ctx) {
+    try {
+      changelog.recordModChanges(server, { source: 'app', by: byOf(ctx) });
+    } catch (err) { /* sin historial */ }
+  }
+  function logItems(server, items, ctx) {
+    try {
+      changelog.record(server, items, { by: byOf(ctx) });
+    } catch (err) { /* sin historial */ }
   }
 
   /** Ejecuta fn como trabajo visible (con barra) y avisa al terminar, salga bien o mal. */
@@ -411,6 +434,7 @@ function createAppCore({ send, notify, minuteMs = 60 * 1000 }) {
     // ---------- Proceso del servidor ----------
     'servers:start': (id) => {
       const server = requireServer(id);
+      logModsBefore(server); // apunta lo que se haya cambiado a mano antes de jugar
       launchServer(server);
       startAutoBackupIntervalIfNeeded(server);
       return true;
@@ -548,8 +572,10 @@ function createAppCore({ send, notify, minuteMs = 60 * 1000 }) {
         if (javaProcess.isRunning(id)) throw new Error('Detén el servidor antes de restaurar un backup.');
         if (!backupManager.isFullBackup(fileName)) {
           const result = await runBackupJob(id, 'restore', () => trackedJob(id, 'restore', async () => backupManager.restoreBackup(server, fileName)));
+          logItems(server, [{ type: 'restore', kind: 'world', file: fileName }], ctx);
           return { ok: true, kind: 'world', ...result };
         }
+        logModsBefore(server);
         const result = await runBackupJob(id, 'restore', () => trackedJob(id, 'restoreFull', async () => {
           if (javaProcess.isRunning(id)) throw new Error('Detén el servidor antes de restaurar un backup.');
           return backupManager.restoreFullBackup(server, fileName, {
@@ -560,6 +586,8 @@ function createAppCore({ send, notify, minuteMs = 60 * 1000 }) {
           });
         }));
         const updated = serverManager.reloadPropertiesFromDisk(id);
+        logItems(server, [{ type: 'restore', kind: 'full', file: fileName }], ctx);
+        logModsAfter(server, ctx);
         return { ok: true, kind: 'full', ...result, server: updated };
       } catch (err) {
         return { ok: false, error: err.message };
@@ -663,6 +691,12 @@ function createAppCore({ send, notify, minuteMs = 60 * 1000 }) {
           store.saveServer(saved);
           return { server: saved, backupFileName: backup.fileName };
         }));
+        {
+          const vanilla = server.loader === 'vanilla';
+          const from = vanilla ? server.mcVersion : server.loaderVersion;
+          const to = vanilla ? result.server.mcVersion : result.server.loaderVersion;
+          if (to && to !== from) logItems(server, [{ type: 'loader', loader: server.loader, from: from || null, to }], ctx);
+        }
         progress({ phase: 'done' });
         return { ok: true, ...result };
       } catch (err) {
@@ -681,12 +715,13 @@ function createAppCore({ send, notify, minuteMs = 60 * 1000 }) {
       }
     },
 
-    'mods:setEnabled': ({ serverId, fileNames, enabled }) => {
+    'mods:setEnabled': ({ serverId, fileNames, enabled }, ctx) => {
       try {
         const server = requireServer(serverId);
         if (javaProcess.isRunning(serverId)) throw new Error('Detén el servidor antes de activar o desactivar mods.');
         const changed = [];
         const failed = [];
+        logModsBefore(server);
         for (const fileName of fileNames || []) {
           try {
             changed.push({ fileName, newFileName: serverMods.setModEnabled(server, fileName, Boolean(enabled)) });
@@ -694,17 +729,21 @@ function createAppCore({ send, notify, minuteMs = 60 * 1000 }) {
             failed.push({ fileName, error: err.message });
           }
         }
+        logModsAfter(server, ctx);
         return { ok: true, changed, failed };
       } catch (err) {
         return { ok: false, error: err.message };
       }
     },
 
-    'mods:removeServer': ({ serverId, fileNames }) => {
+    'mods:removeServer': ({ serverId, fileNames }, ctx) => {
       try {
         const server = requireServer(serverId);
         if (javaProcess.isRunning(serverId)) throw new Error('Detén el servidor antes de quitar mods.');
-        return { ok: true, ...serverMods.removeServerMods(server, fileNames) };
+        logModsBefore(server);
+        const result = serverMods.removeServerMods(server, fileNames);
+        logModsAfter(server, ctx);
+        return { ok: true, ...result };
       } catch (err) {
         return { ok: false, error: err.message };
       }
@@ -730,6 +769,7 @@ function createAppCore({ send, notify, minuteMs = 60 * 1000 }) {
         const server = requireServer(serverId);
         if (javaProcess.isRunning(serverId)) throw new Error('Detén el servidor antes de actualizar mods.');
         if (!Array.isArray(fileNames) || fileNames.length === 0) throw new Error('No has elegido ningún mod.');
+        logModsBefore(server);
         const result = await runBackupJob(serverId, 'update', () => trackedJob(serverId, 'modUpdate', async () => {
           if (javaProcess.isRunning(serverId)) throw new Error('Detén el servidor antes de actualizar mods.');
           let backupFileName = null;
@@ -745,6 +785,7 @@ function createAppCore({ send, notify, minuteMs = 60 * 1000 }) {
           });
           return { ...applied, backupFileName };
         }));
+        logModsAfter(server, ctx);
         progress({ phase: 'done' });
         return { ok: true, ...result };
       } catch (err) {
@@ -811,7 +852,7 @@ function createAppCore({ send, notify, minuteMs = 60 * 1000 }) {
       }
     },
 
-    'mods:applyClientSync': ({ folder, serverId, remove, copy, replace, toServer, removeServer }) => {
+    'mods:applyClientSync': ({ folder, serverId, remove, copy, replace, toServer, removeServer }, ctx) => {
       try {
         const server = requireServer(serverId);
         const modsDir = path.join(server.dir, 'mods');
@@ -820,7 +861,10 @@ function createAppCore({ send, notify, minuteMs = 60 * 1000 }) {
         if (touchesServer && javaProcess.isRunning(serverId)) {
           throw new Error('Para cambiar mods del servidor, detenlo antes.');
         }
-        return { ok: true, ...clientSync.applyClientSync(folder, modsDir, { remove, copy, replace, toServer, removeServer }) };
+        if (touchesServer) logModsBefore(server);
+        const result = clientSync.applyClientSync(folder, modsDir, { remove, copy, replace, toServer, removeServer });
+        if (touchesServer) logModsAfter(server, ctx);
+        return { ok: true, ...result };
       } catch (err) {
         return { ok: false, error: err.message };
       }
@@ -845,11 +889,30 @@ function createAppCore({ send, notify, minuteMs = 60 * 1000 }) {
       }
     },
 
-    'config:save': ({ serverId, rel, hash, changes, content }) => {
+    'config:save': ({ serverId, rel, hash, changes, content }, ctx) => {
       try {
         const server = requireServer(serverId);
         if (['restore', 'update'].includes(backupJobs.get(serverId))) throw new Error('Espera a que termine la restauración o la actualización en curso.');
+        let before = null;
+        try {
+          before = modConfig.readConfig(server, rel);
+        } catch (err) { /* el guardado dará el error de verdad */ }
         const result = modConfig.saveConfig(server, { rel, hash, changes, content });
+        if (result.changed && before) {
+          const name = String(rel).split('/').pop();
+          const hasForm = changes && Object.keys(changes).length && before.kind === 'toml';
+          if (hasForm) {
+            const old = new Map(before.sections.flatMap((sec) => sec.options).map((o) => [o.id, o]));
+            const show = (v) => (Array.isArray(v) ? `[${v.join(', ')}]` : typeof v === 'boolean' ? (v ? 'sí' : 'no') : String(v));
+            const list = Object.entries(changes).map(([id, value]) => {
+              const o = old.get(id);
+              return { key: o ? o.key : id, from: o ? show(o.value) : '?', to: show(value) };
+            });
+            logItems(server, [{ type: 'config', file: name, changes: list }], ctx);
+          } else {
+            logItems(server, [{ type: 'config', file: name, asText: true }], ctx);
+          }
+        }
         return { ok: true, ...result, running: javaProcess.isRunning(serverId) };
       } catch (err) {
         return { ok: false, error: err.message };
@@ -867,21 +930,67 @@ function createAppCore({ send, notify, minuteMs = 60 * 1000 }) {
       }
     },
 
-    'config:setGameRules': ({ serverId, changes }) => {
+    'config:setGameRules': ({ serverId, changes }, ctx) => {
       try {
         const server = requireServer(serverId);
         const running = javaProcess.isRunning(serverId);
         const overrides = running ? liveGameRules.get(serverId) || {} : {};
         const values = modConfig.validateGameRuleChanges(server, changes, overrides);
         if (Object.keys(values).length === 0) throw new Error('No hay cambios que guardar.');
+        const current = new Map(modConfig.listGameRules(server, overrides).rules.map((r) => [r.key, r]));
+        const show = (v) => (v === true || v === 'true' ? 'sí' : v === false || v === 'false' ? 'no' : String(v));
+        const ruleItems = Object.entries(values)
+          .filter(([k, v]) => String(current.get(k) && current.get(k).value) !== v)
+          .map(([k, v]) => ({ type: 'gamerule', key: k, label: current.get(k) ? current.get(k).label : k, from: show(current.get(k) ? current.get(k).value : '?'), to: show(v) }));
         if (running) {
           for (const [k, v] of Object.entries(values)) javaProcess.sendCommand(serverId, `gamerule ${k} ${v}`);
           liveGameRules.set(serverId, { ...overrides, ...values });
+          logItems(server, ruleItems, ctx);
           return { ok: true, live: true };
         }
         if (['restore', 'update'].includes(backupJobs.get(serverId))) throw new Error('Espera a que termine la restauración o la actualización en curso.');
         const result = modConfig.writeGameRulesToLevel(server, values);
+        logItems(server, ruleItems, ctx);
         return { ok: true, live: false, ...result };
+      } catch (err) {
+        return { ok: false, error: err.message };
+      }
+    },
+
+    // ---------- Historial de cambios ----------
+    'changelog:list': (serverId) => {
+      try {
+        const server = requireServer(serverId);
+        return { ok: true, entries: changelog.list(server) };
+      } catch (err) {
+        return { ok: false, error: err.message };
+      }
+    },
+
+    'changelog:discordText': ({ serverId, entryIds }) => {
+      try {
+        const server = requireServer(serverId);
+        const all = changelog.list(server, { detect: false });
+        const wanted = Array.isArray(entryIds) && entryIds.length ? all.filter((e) => entryIds.includes(e.id)) : all.slice(0, 1);
+        return { ok: true, text: changelog.discordText(server.name, wanted) };
+      } catch (err) {
+        return { ok: false, error: err.message };
+      }
+    },
+
+    'changelog:addNote': ({ serverId, text }, ctx) => {
+      try {
+        const server = requireServer(serverId);
+        return { ok: true, entry: changelog.addNote(server, text, { by: byOf(ctx) }) };
+      } catch (err) {
+        return { ok: false, error: err.message };
+      }
+    },
+
+    'changelog:deleteEntry': ({ serverId, entryId }) => {
+      try {
+        changelog.deleteEntry(requireServer(serverId), entryId);
+        return { ok: true };
       } catch (err) {
         return { ok: false, error: err.message };
       }
@@ -892,11 +1001,13 @@ function createAppCore({ send, notify, minuteMs = 60 * 1000 }) {
     'app:setCurseForge': (apiKey) => curseforge.setApiKey(apiKey),
     'app:removeCurseForge': () => curseforge.removeApiKey(),
 
-    'mods:apply': ({ serverId, results, includeUnknown }) => {
+    'mods:apply': ({ serverId, results, includeUnknown }, ctx) => {
       try {
         const server = requireServer(serverId);
         const modsDir = path.join(server.dir, 'mods');
+        logModsBefore(server);
         const result = modAnalyzer.applyModsToServer(modsDir, results, { includeUnknown });
+        logModsAfter(server, ctx);
         return { ok: true, ...result };
       } catch (err) {
         return { ok: false, error: err.message };

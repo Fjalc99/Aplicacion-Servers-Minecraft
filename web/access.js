@@ -58,6 +58,8 @@ const OWNER_CHANNELS = new Set([
   'servers:resourceUsage',
   'servers:listBackups',
   'servers:jobStatus',
+  'changelog:list',
+  'changelog:discordText',
   'servers:readPlayerList',
   'servers:removeFromPlayerList',
   'servers:start',
@@ -85,6 +87,8 @@ const OWNER_CHANNELS = new Set([
   'config:save',
   'config:gameRules',
   'config:setGameRules',
+  'changelog:addNote',
+  'changelog:deleteEntry',
 ]);
 
 const LEVEL_NAME_PATTERN = /^[a-zA-Z0-9_\- ]{1,48}$/;

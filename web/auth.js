@@ -37,6 +37,8 @@ const FRIEND_CHANNELS = new Set([
   'servers:systemMemory',
   'servers:listBackups',
   'servers:jobStatus',
+  'changelog:list',
+  'changelog:discordText',
   'servers:readPlayerList',
   'servers:start',
   'servers:stop',

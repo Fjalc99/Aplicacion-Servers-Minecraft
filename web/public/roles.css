@@ -30,6 +30,8 @@ body[data-role="amigo"][data-server-access="shared"] [data-action="restore"],
 body[data-role="amigo"][data-server-access="shared"] [data-action="delete"],
 body[data-role="amigo"][data-server-access="shared"] [data-action="download"],
 body[data-role="amigo"][data-server-access="shared"] #fullBackupBtn,
+body[data-role="amigo"][data-server-access="shared"] #changesNoteBox,
+body[data-role="amigo"][data-server-access="shared"] [data-del],
 body[data-role="amigo"][data-server-access="shared"] [data-remove] {
   display: none !important;
 }

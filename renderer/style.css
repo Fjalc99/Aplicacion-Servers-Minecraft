@@ -1045,3 +1045,30 @@ input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--accent);
   .cfg-row { grid-template-columns: minmax(0, 1fr); }
   .cfg-row-control { justify-content: flex-start; }
 }
+
+/* ---------- Pestaña Cambios ---------- */
+.changes-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; flex-wrap: wrap; }
+.changes-top > div:first-child { flex: 1 1 320px; min-width: 0; }
+.changes-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.changes-note { display: flex; gap: 8px; margin-top: 14px; flex-wrap: wrap; }
+.changes-note input { flex: 1 1 240px; min-width: 0; }
+.changes-entries { display: flex; flex-direction: column; gap: 10px; margin-top: 14px; }
+.changes-entry { border: 1px solid var(--border); border-radius: 10px; background: var(--surface); padding: 12px 16px 14px; }
+.changes-entry.on { border-color: rgba(232, 150, 63, .55); box-shadow: inset 3px 0 0 var(--accent); }
+.changes-entry-head { display: flex; align-items: center; gap: 10px; }
+.changes-pick { display: flex; align-items: center; }
+.changes-pick input { width: 16px; height: 16px; accent-color: var(--accent); }
+.changes-when { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; flex: 1; min-width: 0; }
+.changes-chip-warn { background: rgba(232, 150, 63, .14); color: var(--accent-strong); }
+.changes-del { margin-left: auto; padding: 0 9px; }
+.changes-group { margin-top: 10px; }
+.changes-group-title { font-size: 13px; font-weight: 600; margin-bottom: 4px; }
+.changes-add { color: #8fc47a; }
+.changes-upd { color: #a9c3f5; }
+.changes-rem { color: #e9a59c; }
+.changes-list { margin: 0; padding-left: 22px; display: flex; flex-direction: column; gap: 3px; font-size: 13.5px; }
+.changes-others { list-style: none; padding-left: 2px; margin-top: 10px; }
+.changes-ver { font-family: var(--mono); font-size: 12px; color: var(--text-muted); }
+.changes-entry code { font-family: var(--mono); font-size: 12px; }
+.changes-preview { margin-top: 8px; }
+.changes-preview textarea { margin-top: 6px; }

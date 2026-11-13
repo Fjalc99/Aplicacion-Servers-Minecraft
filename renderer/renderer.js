@@ -226,7 +226,7 @@ async function switchTab(tabName, serverArg) {
   state.currentTab = tabName;
   document.getElementById('serverView').dataset.tab = tabName;
   document.querySelectorAll('.tab').forEach((b) => b.classList.toggle('active', b.dataset.tab === tabName));
-  ['home', 'overview', 'config', 'mods', 'console'].forEach((t) => {
+  ['home', 'overview', 'config', 'mods', 'changes', 'console'].forEach((t) => {
     document.getElementById(`tab-${t}`).hidden = t !== tabName;
   });
   if (tabName !== 'home') stopHomePolling();
@@ -236,6 +236,7 @@ async function switchTab(tabName, serverArg) {
   if (tabName === 'overview') renderOverview(server);
   if (tabName === 'config') renderConfig(server);
   if (tabName === 'mods') renderMods(server);
+  if (tabName === 'changes') renderChanges(server);
   if (tabName === 'console') {
     // Al entrar en la consola: al final del todo y listo para escribir
     const log = document.getElementById('consoleLog');
@@ -4546,4 +4547,203 @@ async function cfgSave(server) {
   cfgUi.message = { kind: 'ok', text };
   cfgRenderMain(server);
   cfgRenderPending(server);
+}
+
+// ---------------------------------------------------------------------------
+// Pestaña "Cambios": historial automático de cada servidor
+// ---------------------------------------------------------------------------
+
+const changesUi = { serverId: null, entries: null, selected: new Set(), message: null, copied: null };
+
+const CHANGE_GROUPS = [
+  { type: 'modAdded', icon: '➕', label: 'Añadidos', cls: 'add' },
+  { type: 'modUpdated', icon: '⬆️', label: 'Actualizados', cls: 'upd' },
+  { type: 'modRemoved', icon: '➖', label: 'Quitados', cls: 'rem' },
+  { type: 'modEnabled', icon: '▶️', label: 'Activados', cls: 'upd' },
+  { type: 'modDisabled', icon: '⏸️', label: 'Desactivados', cls: 'rem' },
+];
+
+function changeItemHtml(it) {
+  const v = (x) => (x ? ` <span class="changes-ver">${escapeHtml(x)}</span>` : '');
+  switch (it.type) {
+    case 'modAdded': return `${escapeHtml(it.name)}${v(it.version)}${it.enabled === false ? ' <span class="hint">(desactivado)</span>' : ''}`;
+    case 'modRemoved': return `${escapeHtml(it.name)}${v(it.version)}`;
+    case 'modUpdated': return `${escapeHtml(it.name)} <span class="changes-ver">${escapeHtml(it.from)} → ${escapeHtml(it.to)}</span>`;
+    case 'modEnabled':
+    case 'modDisabled': return escapeHtml(it.name);
+    case 'loader': return `🔧 <strong>${escapeHtml(LOADER_LABEL[it.loader] || it.loader)}</strong> <span class="changes-ver">${escapeHtml(it.from || '?')} → ${escapeHtml(it.to)}</span>`;
+    case 'config': return it.asText
+      ? `⚙️ Configuración <code>${escapeHtml(it.file)}</code> editada como texto`
+      : `⚙️ Configuración <code>${escapeHtml(it.file)}</code>: ${(it.changes || []).map((c) => `${escapeHtml(c.key)} <span class="changes-ver">${escapeHtml(c.from)} → ${escapeHtml(c.to)}</span>`).join(', ')}`;
+    case 'gamerule': return `🌍 Regla del mundo: ${escapeHtml(it.label || it.key)} <span class="changes-ver">${escapeHtml(it.from)} → ${escapeHtml(it.to)}</span>`;
+    case 'restore': return `♻️ Restaurado el ${it.kind === 'full' ? 'backup completo' : 'backup del mundo'} <code>${escapeHtml(it.file)}</code>`;
+    case 'note': return `📝 ${escapeHtml(it.text)}`;
+    case 'baseline': return `📋 Empieza el historial: ${it.count} mods instalados. A partir de ahora se apunta todo lo que cambie.`;
+    default: return '';
+  }
+}
+
+function changeDate(ms) {
+  const d = new Date(ms);
+  const today = new Date();
+  const yesterday = new Date(Date.now() - 86400000);
+  const time = d.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' });
+  if (d.toDateString() === today.toDateString()) return `Hoy, ${time}`;
+  if (d.toDateString() === yesterday.toDateString()) return `Ayer, ${time}`;
+  return `${d.toLocaleDateString('es-ES', { day: 'numeric', month: 'short', year: d.getFullYear() === today.getFullYear() ? undefined : 'numeric' })}, ${time}`;
+}
+
+function changeEntryHtml(e) {
+  const groups = CHANGE_GROUPS.map((g) => ({ ...g, items: e.items.filter((it) => it.type === g.type) })).filter((g) => g.items.length);
+  const others = e.items.filter((it) => !CHANGE_GROUPS.some((g) => g.type === it.type));
+  const source = e.source === 'detected'
+    ? '<span class="chip changes-chip-warn" title="Se cambió la carpeta mods sin usar la app">Cambiado en la carpeta</span>'
+    : e.source === 'note' ? '<span class="chip">Nota</span>' : '';
+  const checked = changesUi.selected.has(e.id);
+  return `
+    <article class="changes-entry${checked ? ' on' : ''}" data-entry="${escapeHtml(e.id)}">
+      <header class="changes-entry-head">
+        <label class="changes-pick"><input type="checkbox" data-pick="${escapeHtml(e.id)}" ${checked ? 'checked' : ''} /> <span class="visually-hidden">Elegir para copiar</span></label>
+        <div class="changes-when">
+          <strong>${escapeHtml(changeDate(e.at))}</strong>
+          ${e.by ? `<span class="hint">por ${escapeHtml(e.by)}</span>` : ''}
+          ${source}
+        </div>
+        <button type="button" class="btn btn-ghost btn-small changes-del" data-del="${escapeHtml(e.id)}" title="Quitar del historial" aria-label="Quitar esta entrada del historial">✕</button>
+      </header>
+      ${groups.map((g) => `
+        <div class="changes-group">
+          <div class="changes-group-title changes-${g.cls}">${g.icon} ${g.label} (${g.items.length})</div>
+          ${g.items.length > 12 ? `<details><summary class="hint">Ver los ${g.items.length}</summary>` : ''}
+          <ul class="changes-list">${g.items.map((it) => `<li>${changeItemHtml(it)}</li>`).join('')}</ul>
+          ${g.items.length > 12 ? '</details>' : ''}
+        </div>`).join('')}
+      ${others.length ? `<ul class="changes-list changes-others">${others.map((it) => `<li>${changeItemHtml(it)}</li>`).join('')}</ul>` : ''}
+    </article>`;
+}
+
+async function renderChanges(server) {
+  const el = document.getElementById('tab-changes');
+  if (changesUi.serverId !== server.id) {
+    Object.assign(changesUi, { serverId: server.id, entries: null, selected: new Set(), message: null, copied: null });
+  }
+  el.innerHTML = `
+    <div class="card">
+      <div class="changes-top">
+        <div>
+          <h3 style="margin:0 0 4px;">Historial de cambios</h3>
+          <p class="hint" style="margin:0;">La app apunta sola lo que cambia en el servidor: mods añadidos, quitados o actualizados, versión de ${escapeHtml(LOADER_LABEL[server.loader] || 'Minecraft')}, configuración de mods, reglas del mundo y backups restaurados. Si tocas la carpeta <code>mods</code> a mano, también lo detecta.</p>
+        </div>
+        <div class="changes-actions">
+          <button type="button" class="btn btn-accent" id="changesCopy">Copiar para Discord</button>
+        </div>
+      </div>
+      <p class="hint" id="changesCopyHint" style="margin:10px 0 0;"></p>
+      <div id="changesMsg"></div>
+      <div class="changes-note" id="changesNoteBox">
+        <label for="changesNote" class="visually-hidden">Añadir una nota</label>
+        <input type="text" id="changesNote" maxlength="1000" placeholder="Añadir una nota (p. ej. «Nuevo modpack, descargadlo de nuevo»)" />
+        <button type="button" class="btn btn-ghost" id="changesNoteBtn">Añadir nota</button>
+      </div>
+    </div>
+    <div id="changesList" class="changes-entries"><p class="hint">Leyendo el historial…</p></div>
+  `;
+  document.getElementById('changesCopy').addEventListener('click', () => copyChanges(server));
+  const noteInput = document.getElementById('changesNote');
+  const addNote = async () => {
+    const text = noteInput.value.trim();
+    if (!text) return;
+    const res = await window.api.addChangeNote(server.id, text);
+    if (!res.ok) {
+      changesMessage('error', res.error);
+      return;
+    }
+    noteInput.value = '';
+    await loadChanges(server);
+  };
+  document.getElementById('changesNoteBtn').addEventListener('click', addNote);
+  noteInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') addNote(); });
+  document.getElementById('changesList').addEventListener('change', (e) => {
+    const id = e.target.dataset && e.target.dataset.pick;
+    if (!id) return;
+    if (e.target.checked) changesUi.selected.add(id);
+    else changesUi.selected.delete(id);
+    e.target.closest('.changes-entry').classList.toggle('on', e.target.checked);
+    updateCopyHint();
+  });
+  document.getElementById('changesList').addEventListener('click', async (e) => {
+    const btn = e.target.closest('[data-del]');
+    if (!btn) return;
+    if (!confirm('¿Quitar esta entrada del historial? (No deshace el cambio, solo lo borra de la lista.)')) return;
+    const res = await window.api.deleteChangeEntry(server.id, btn.dataset.del);
+    if (!res.ok) changesMessage('error', res.error);
+    changesUi.selected.delete(btn.dataset.del);
+    await loadChanges(server);
+  });
+  await loadChanges(server);
+}
+
+function changesMessage(kind, text) {
+  const box = document.getElementById('changesMsg');
+  if (box) box.innerHTML = text ? `<p class="cfg-msg ${kind}" style="margin-top:10px;">${escapeHtml(text)}</p>` : '';
+}
+
+function updateCopyHint() {
+  const hint = document.getElementById('changesCopyHint');
+  if (!hint) return;
+  const n = changesUi.selected.size;
+  hint.textContent = n
+    ? `Se copiarán las ${n} entrada(s) marcadas.`
+    : 'Se copia la entrada más reciente. Marca varias con la casilla para copiarlas juntas.';
+}
+
+async function loadChanges(server) {
+  let res;
+  try {
+    res = await window.api.listChanges(server.id);
+  } catch (error) {
+    res = { ok: false, error: error.message };
+  }
+  if (state.selectedId !== server.id || state.currentTab !== 'changes') return;
+  const list = document.getElementById('changesList');
+  if (!res.ok) {
+    list.innerHTML = `<p class="error-text">${escapeHtml(res.error)}</p>`;
+    return;
+  }
+  changesUi.entries = res.entries;
+  for (const id of [...changesUi.selected]) if (!res.entries.some((e) => e.id === id)) changesUi.selected.delete(id);
+  list.innerHTML = res.entries.length
+    ? res.entries.map(changeEntryHtml).join('')
+    : '<p class="hint">Todavía no hay cambios apuntados.</p>';
+  updateCopyHint();
+}
+
+async function copyChanges(server) {
+  const ids = [...changesUi.selected];
+  const res = await window.api.changesDiscordText(server.id, ids);
+  if (!res.ok) {
+    changesMessage('error', res.error);
+    return;
+  }
+  let copied = false;
+  try {
+    await navigator.clipboard.writeText(res.text);
+    copied = true;
+  } catch (error) {
+    const ta = document.createElement('textarea');
+    ta.value = res.text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    try {
+      copied = document.execCommand('copy');
+    } catch (err) { /* no se pudo */ }
+    ta.remove();
+  }
+  const box = document.getElementById('changesMsg');
+  if (!box) return;
+  box.innerHTML = `
+    <p class="cfg-msg ${copied ? 'ok' : 'info'}" style="margin-top:10px;">${copied ? '✓ Copiado. Pégalo en Discord.' : 'No se pudo copiar solo: selecciona el texto de abajo y cópialo.'}</p>
+    <details ${copied ? '' : 'open'} class="changes-preview"><summary class="hint">Ver el texto</summary><textarea readonly rows="8" class="cfg-textarea" style="min-height:0;">${escapeHtml(res.text)}</textarea></details>`;
 }

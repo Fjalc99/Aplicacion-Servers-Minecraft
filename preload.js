@@ -88,6 +88,10 @@ contextBridge.exposeInMainWorld('api', {
   removeBackupProgressListeners: (id) => ipcRenderer.removeAllListeners(`servers:backupProgress:${id}`),
   getJobStatus: (id) => ipcRenderer.invoke('servers:jobStatus', id),
   onJob: (id, cb) => ipcRenderer.on(`servers:job:${id}`, (e, info) => cb(info)),
+  listChanges: (serverId) => ipcRenderer.invoke('changelog:list', serverId),
+  changesDiscordText: (serverId, entryIds) => ipcRenderer.invoke('changelog:discordText', { serverId, entryIds }),
+  addChangeNote: (serverId, text) => ipcRenderer.invoke('changelog:addNote', { serverId, text }),
+  deleteChangeEntry: (serverId, entryId) => ipcRenderer.invoke('changelog:deleteEntry', { serverId, entryId }),
 
   // Catálogo
   listVanillaVersions: () => ipcRenderer.invoke('catalog:vanillaVersions'),
